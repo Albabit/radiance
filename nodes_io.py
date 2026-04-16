@@ -391,10 +391,11 @@ class RadianceDigitalCinemaWrite:
                     # ALBABIT-FIX: Added tooltip documenting per-codec quality behavior.
                     "tooltip": (
                         "Output quality — behavior depends on format:\n"
+                        "• H.264: maps to CRF (0=worst/smallest, 100=lossless). Default 10 = CRF ~46.\n"
                         "• H.265: maps to CRF (0=worst/smallest, 100=lossless). Default 10 = CRF ~46.\n"
-                        "• JPEG sequences: effective range is 0–10 (×10 scale; default 10 = max quality).\n"
+                        "• JPEG sequences: 0–100 direct quality scale (0=worst, 100=best).\n"
                         "• WEBP: 0–100 direct quality scale.\n"
-                        "• H.264 / ProRes / PNG / EXR / HDR: no effect (codec handles quality internally)."
+                        "• ProRes / PNG / EXR / HDR: no effect (lossless or fixed-bitrate codec)."
                     ),
                 }),
                 "output_color_space": (INPUT_COLORSPACES, {
@@ -577,13 +578,34 @@ class RadianceWrite:
         fpath_mov = os.path.join(output_dir, f"{prefix}_{ts}.mov")
 
         if "H.264" in fmt:
-            # ── H.264 / AVC — 8-bit, imageio path ──────────────────────────────
-            data = (np.clip(images_np, 0, 1) * 255).astype(np.uint8)
-            iio.imwrite(
-                fpath_mp4, data,
-                fps=fps, codec="libx264", pixelformat="yuv420p",
-                macro_block_size=1,
-            )
+            # ── H.264 / AVC — 8-bit, ffmpeg subprocess ──────────────────────────
+            # ALBABIT-FIX: Switched from imageio (no CRF control) to ffmpeg subprocess
+            # so that the quality widget is respected, mirroring the H.265 path.
+            # CRF range for H.264: 0 (lossless) – 51 (worst). quality 0-100 → CRF.
+            crf_h264 = max(0, min(51, int((1.0 - quality / 100.0) * 51)))
+            frames_u8 = (np.clip(images_np, 0, 1) * 255).astype(np.uint8)
+            h, w = frames_u8.shape[1], frames_u8.shape[2]
+            cmd = [
+                "ffmpeg", "-y",
+                "-f", "rawvideo", "-vcodec", "rawvideo",
+                "-s", f"{w}x{h}", "-pix_fmt", "rgb24",
+                "-r", str(fps),
+                "-i", "pipe:0",
+                "-vcodec", "libx264",
+                "-pix_fmt", "yuv420p",          # 8-bit 4:2:0, broadest compatibility
+                "-crf", str(crf_h264),
+                "-preset", "slow",
+                "-movflags", "+faststart",       # web streaming compatibility
+                fpath_mp4,
+            ]
+            raw = frames_u8.tobytes()
+            result = subprocess.run(cmd, input=raw, capture_output=True, timeout=600)  # nosec B603
+            if result.returncode != 0:
+                logger.error(
+                    f"[RadianceWrite] H.264 encode failed:\n"
+                    f"{result.stderr.decode(errors='replace')}"
+                )
+                raise RuntimeError("ffmpeg H.264 encode failed — see log for details")
             fpath = fpath_mp4
 
         elif "H.265" in fmt:
@@ -798,7 +820,8 @@ class RadianceWrite:
                 ext = ".jpg"
                 fname = f"{prefix}{ext}" if is_single_image else f"{prefix}.{num}{ext}"
                 fpath = os.path.join(target, fname)
-                cv2.imwrite(fpath, cv2.cvtColor((np.clip(frame, 0, 1)*255).astype(np.uint8), cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, quality * 10])
+                # ALBABIT-FIX: Use quality directly (0-100) — previous quality*10 caused all values >10 to clamp to max.
+                cv2.imwrite(fpath, cv2.cvtColor((np.clip(frame, 0, 1)*255).astype(np.uint8), cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, quality])
             else: # PNG
                 ext = ".png"
                 fname = f"{prefix}{ext}" if is_single_image else f"{prefix}.{num}{ext}"
