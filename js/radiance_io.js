@@ -154,6 +154,7 @@ app.registerExtension({
 
 				const writeModeWidget   = this.widgets.find(w => w.name === "write_mode");
 				const formatWidget      = this.widgets.find(w => w.name === "output_format");
+				const qualityWidget     = this.widgets.find(w => w.name === "quality");
 				const fpsWidget         = this.widgets.find(w => w.name === "fps");
 				const startFrameWidget  = this.widgets.find(w => w.name === "start_frame");
 				const bitDepthWidget    = this.widgets.find(w => w.name === "bit_depth");
@@ -181,11 +182,22 @@ app.registerExtension({
 					const fmt    = formatWidget ? formatWidget.value : "";
 					const is_exr = fmt.includes("EXR");
 					const is_png = fmt.includes("PNG");
+					const is_jpg = fmt.includes("JPEG");
+					const is_webp = fmt.includes("WEBP");
+					const is_crf = fmt.includes("H.264") || fmt.includes("H.265");
 
 					const isVideo    = mode === "Video";
 					const isSequence = mode === "Sequence";
 					const isSingle   = mode === "Single Image";
 					const isSeqLike  = isSequence || isSingle;
+
+					// ALBABIT-FIX: Dynamic quality label reflects the active codec's quality scale.
+					if (qualityWidget) {
+						qualityWidget.label = is_crf
+							? "quality (CRF)"
+							: (is_jpg || is_webp) ? "quality (0–100)"
+							: "quality";
+					}
 
 					// FPS only relevant for video
 					setWidgetVisible(fpsWidget, isVideo);

@@ -387,12 +387,12 @@ class RadianceDigitalCinemaWrite:
                 "output_format": (WRITE_FORMATS, {"default": "Video — MP4 (H.265 10-bit)"}),
                 "fps": ("FLOAT", {"default": 24.0, "min": 1.0}),
                 "quality": ("INT", {
-                    "default": 10, "min": 0, "max": 100,
+                    "default": 80, "min": 0, "max": 100,
                     # ALBABIT-FIX: Added tooltip documenting per-codec quality behavior.
                     "tooltip": (
                         "Output quality — behavior depends on format:\n"
-                        "• H.264: maps to CRF (0=worst/smallest, 100=lossless). Default 10 = CRF ~46.\n"
-                        "• H.265: maps to CRF (0=worst/smallest, 100=lossless). Default 10 = CRF ~46.\n"
+                        "• H.264: maps to CRF (0=worst/smallest, 100=lossless). Default 80 = CRF ~10.\n"
+                        "• H.265: maps to CRF (0=worst/smallest, 100=lossless). Default 80 = CRF ~10.\n"
                         "• JPEG sequences: 0–100 direct quality scale (0=worst, 100=best).\n"
                         "• WEBP: 0–100 direct quality scale.\n"
                         "• ProRes / PNG / EXR / HDR: no effect (lossless or fixed-bitrate codec)."
