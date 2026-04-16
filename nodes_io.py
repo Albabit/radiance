@@ -391,8 +391,7 @@ class RadianceDigitalCinemaWrite:
                     # ALBABIT-FIX: Added tooltip documenting per-codec quality behavior.
                     "tooltip": (
                         "Output quality — behavior depends on format:\n"
-                        "• H.264: maps to CRF (0=worst/smallest, 100=lossless). Default 80 = CRF ~10.\n"
-                        "• H.265: maps to CRF (0=worst/smallest, 100=lossless). Default 80 = CRF ~10.\n"
+                        "• H.264 / H.265: maps to CRF (0=worst/smallest, 100=lossless). Default 80 = CRF ~10.\n"
                         "• JPEG sequences: 0–100 direct quality scale (0=worst, 100=best).\n"
                         "• WEBP: 0–100 direct quality scale.\n"
                         "• ProRes / PNG / EXR / HDR: no effect (lossless or fixed-bitrate codec)."
@@ -432,10 +431,12 @@ class RadianceDigitalCinemaWrite:
                         "Output directory for saved files.\n"
                         "• Empty: uses ComfyUI's default output folder.\n"
                         "• Relative path (e.g. 'MyProject/Renders'): subfolder created inside the "
-                        "ComfyUI output directory.\n"
-                        "• Absolute path (e.g. 'D:/VFX/Shots/sh010'): writes directly to that location "
-                        "on disk — useful for network drives or project-rooted pipelines.\n"
-                        "Use forward slashes or backslashes — both are accepted."
+                        "ComfyUI output directory. Do NOT start with '/' or '\\'.\n"
+                        "• Absolute path (e.g. 'D:/VFX/Shots/sh010' or 'D:\\VFX\\Shots'): writes "
+                        "directly to that location on disk — useful for network drives or "
+                        "project-rooted pipelines. Paths starting with '/' are treated as absolute "
+                        "from the current drive root (e.g. '/video' → 'D:\\video').\n"
+                        "Forward slashes and backslashes are both accepted."
                     ),
                 }),
                 "start_frame": ("INT", {"default": 1, "min": 0}),
@@ -536,11 +537,6 @@ class RadianceWrite:
         images_np = images_out.cpu().numpy()
         ts = int(time.time())
 
-        # ALBABIT-FIX: Export audio as a separate file when a non-None format is selected.
-        # Useful for image sequence outputs which do not carry an audio track.
-        if write_external_audio_file != "None" and audio is not None:
-            self._write_audio_file(audio, write_external_audio_file, filename_prefix, audio_filename_suffix, full_out, ts)
-
         # Build Metadata
         meta = {
             "software": "Radiance v2.3",
@@ -568,7 +564,15 @@ class RadianceWrite:
             res = self._write_sequence(images_np[:1], filename_prefix, output_format, quality, full_out, ts, start_frame, 4, False, bit_depth, compression, meta, alpha_mode, is_single_image=True)
         else:
             res = self._write_sequence(images_np, filename_prefix, output_format, quality, full_out, ts, start_frame, 4, True, bit_depth, compression, meta, alpha_mode)
-        
+
+        # ALBABIT-FIX: Export audio after images so we can resolve the correct target directory.
+        # In Sequence mode, _write_sequence returns the sequence subfolder (prefix_timestamp/) —
+        # the audio file should land there alongside the frames, not in the parent output_path.
+        # In all other modes, full_out is the correct location.
+        if write_external_audio_file != "None" and audio is not None:
+            audio_dir = res if write_mode == "Sequence" and os.path.isdir(res) else full_out
+            self._write_audio_file(audio, write_external_audio_file, filename_prefix, audio_filename_suffix, audio_dir, ts)
+
         return (image, res, res)
 
     def _write_video(self, images_np, prefix, fmt, fps, quality, color_space, output_dir, ts, audio, broadcast_safe):
