@@ -386,17 +386,88 @@ class RadianceDigitalCinemaWrite:
                 "write_mode": (["Video", "Sequence", "Single Image"], {"default": "Video"}),
                 "output_format": (WRITE_FORMATS, {"default": "Video — MP4 (H.265 10-bit)"}),
                 "fps": ("FLOAT", {"default": 24.0, "min": 1.0}),
-                "quality": ("INT", {"default": 10, "min": 0, "max": 100}),
-                "output_color_space": (INPUT_COLORSPACES, {"default": "sRGB (Standard)"}),
-                "broadcast_safe": ("BOOLEAN", {"default": True}),
+                "quality": ("INT", {
+                    "default": 10, "min": 0, "max": 100,
+                    # ALBABIT-FIX: Added tooltip documenting per-codec quality behavior.
+                    "tooltip": (
+                        "Output quality — behavior depends on format:\n"
+                        "• H.265: maps to CRF (0=worst/smallest, 100=lossless). Default 10 = CRF ~46.\n"
+                        "• JPEG sequences: effective range is 0–10 (×10 scale; default 10 = max quality).\n"
+                        "• WEBP: 0–100 direct quality scale.\n"
+                        "• H.264 / ProRes / PNG / EXR / HDR: no effect (codec handles quality internally)."
+                    ),
+                }),
+                "output_color_space": (INPUT_COLORSPACES, {
+                    "default": "sRGB (Standard)",
+                    # ALBABIT-FIX: Added tooltip describing color transform applied before writing.
+                    "tooltip": (
+                        "Color space transform applied to the image before writing to disk.\n"
+                        "• sRGB (Standard): standard display delivery (web, SDR monitors).\n"
+                        "• Linear (sRGB): raw linear light, no gamma curve — for compositing pipelines.\n"
+                        "• ACEScg: wide-gamut linear VFX working space (DaVinci Resolve, Nuke).\n"
+                        "• DaVinci Intermediate / ARRI LogC3-4 / Sony S-Log3 / V-Log: log encoding "
+                        "for roundtrip with camera footage or grading in a log-native timeline.\n"
+                        "• ACEScct: log-like tone curve for ACES grading workflows."
+                    ),
+                }),
+                "broadcast_safe": ("BOOLEAN", {
+                    "default": True,
+                    # ALBABIT-FIX: Added tooltip clarifying broadcast_safe scope and HDR impact.
+                    "tooltip": (
+                        "Clamps output values to [0.0–1.0] and applies a filmic ACES tone curve. "
+                        "Only active when output_color_space is set to 'sRGB (Standard)'.\n"
+                        "• True: safe for SDR delivery — prevents clipping artifacts on display.\n"
+                        "• False: values above 1.0 are preserved — required for HDR and VFX pipelines "
+                        "(e.g. EXR export to DaVinci Resolve with inverse tonemapping)."
+                    ),
+                }),
             },
             "optional": {
                 "audio": ("AUDIO",),
-                "output_path": ("STRING", {"default": ""}),
+                "output_path": ("STRING", {
+                    "default": "",
+                    # ALBABIT-FIX: Added tooltip documenting relative and absolute path behavior.
+                    "tooltip": (
+                        "Output directory for saved files.\n"
+                        "• Empty: uses ComfyUI's default output folder.\n"
+                        "• Relative path (e.g. 'MyProject/Renders'): subfolder created inside the "
+                        "ComfyUI output directory.\n"
+                        "• Absolute path (e.g. 'D:/VFX/Shots/sh010'): writes directly to that location "
+                        "on disk — useful for network drives or project-rooted pipelines.\n"
+                        "Use forward slashes or backslashes — both are accepted."
+                    ),
+                }),
                 "start_frame": ("INT", {"default": 1, "min": 0}),
                 "bit_depth": (BIT_DEPTHS, {"default": "32-bit Float"}),
-                "compression": (COMPRESSIONS, {"default": "ZIP"}),
-                "alpha_mode": (ALPHA_MODES, {"default": "From Image"}),
+                "compression": (COMPRESSIONS, {
+                    "default": "ZIP",
+                    # ALBABIT-FIX: Added tooltip describing EXR compression options.
+                    "tooltip": (
+                        "EXR compression method — applies only to EXR sequences and single images.\n"
+                        "• ZIP: lossless, multi-scanline — recommended for general VFX use.\n"
+                        "• ZIPS: lossless, single-scanline ZIP — faster but larger files.\n"
+                        "• PIZ: lossless wavelet — best for grainy or noisy images.\n"
+                        "• RLE: lossless run-length — fast for flat/CG renders.\n"
+                        "• None: uncompressed — fastest I/O, largest files.\n"
+                        "• PXR24: lossy 24-bit float (Pixar legacy format).\n"
+                        "• B44 / B44A: lossy fixed-ratio — fast decode, good for playback.\n"
+                        "• DWAA / DWAB: lossy DCT-based — smallest files, some quality loss.\n"
+                        "Has no effect on PNG, JPEG, HDR, or video formats."
+                    ),
+                }),
+                "alpha_mode": (ALPHA_MODES, {
+                    "default": "From Image",
+                    # ALBABIT-FIX: Added tooltip noting alpha_mode is not yet implemented.
+                    "tooltip": (
+                        "Alpha channel handling for formats that support transparency (PNG, EXR).\n"
+                        "• None: discard alpha — export as RGB.\n"
+                        "• From Image: use alpha channel from the source image if present.\n"
+                        "• Solid White: force alpha = 1.0 (fully opaque).\n"
+                        "• Solid Black: force alpha = 0.0 (fully transparent).\n"
+                        "Note: this setting is not yet functional — the alpha logic is not implemented. "
+                        "All modes currently output RGB only."
+                    ),
+                }),
                 # ALBABIT-FIX: Audio export widgets placed before custom_metadata to avoid overlap
                 # with the multiline text area when these widgets are shown/hidden by the JS.
                 "write_external_audio_file": (AUDIO_EXPORT_FORMATS, {
@@ -416,7 +487,18 @@ class RadianceDigitalCinemaWrite:
                         "(e.g. prefix + '_audio' → 'MyShot_audio.wav')."
                     ),
                 }),
-                "custom_metadata": ("STRING", {"default": "", "multiline": True}),
+                # ALBABIT-FIX: Added tooltip for custom_metadata.
+                "custom_metadata": ("STRING", {
+                    "default": "", "multiline": True,
+                    "tooltip": (
+                        "Custom key-value metadata embedded in the output file.\n"
+                        "Enter one entry per line in 'key=value' format "
+                        "(e.g. 'shot=sh010' or 'colorspace=ACEScg').\n"
+                        "• EXR: written as named EXR header attributes.\n"
+                        "• PNG: written into tEXt chunks.\n"
+                        "• Other formats: metadata may be silently ignored depending on container support."
+                    ),
+                }),
             },
             "hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
         }
