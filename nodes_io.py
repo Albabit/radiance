@@ -342,18 +342,39 @@ WRITE_FORMATS = [
     "Image Sequence — PNG (16-bit)",
     "Image Sequence — PNG (8-bit)",
     "Image Sequence — JPEG",
+    # ALBABIT-FIX: GIF/WEBP animated belong in Sequence mode; static variants in Single Image.
+    # Removed from Video group — they have no audio track and are not cinema formats.
+    "GIF — Animated", "WEBP — Animated",
+    "GIF", "WEBP",
     "Video — MP4 (H.264)",
     "Video — MP4 (H.265 10-bit)",
     "Video — MOV (ProRes 422 HQ)",
     "Video — MOV (ProRes 4444)",
     "Video — MOV (ProRes 4444 XQ)",
     "Video — MOV (ProRes 4444 HDR Log)",
-    "GIF", "WEBP",
+    # ALBABIT-FIX: Single Image mode uses these shorter labels (no "Image Sequence —" prefix).
+    # The JS FORMAT_GROUPS["Single Image"] references these values; routing in _write_sequence()
+    # uses substring checks ("EXR", "HDR", "PNG", "JPEG") so both name styles are handled.
+    "EXR (32-bit)",
+    "Radiance HDR (.hdr)",
+    "PNG (16-bit)",
+    "PNG (8-bit)",
+    "JPEG",
 ]
 
 COMPRESSIONS = ["ZIP", "ZIPS", "PIZ", "RLE", "None", "PXR24", "B44", "B44A", "DWAA", "DWAB"]
 BIT_DEPTHS = ["16-bit Half Float", "32-bit Float"]
 ALPHA_MODES = ["None", "From Image", "Solid White", "Solid Black"]
+# ALBABIT-FIX: Audio export format options for image sequence / single image write modes.
+# Lossless-only formats — no lossy codecs in a VFX pipeline.
+AUDIO_EXPORT_FORMATS = [
+    "None",
+    "WAV — PCM 32-bit Float",
+    "WAV — PCM 24-bit",
+    "WAV — PCM 16-bit",
+    "AIFF — PCM 24-bit",
+    "FLAC — Lossless",
+]
 
 class RadianceDigitalCinemaWrite:
     @classmethod
@@ -376,10 +397,30 @@ class RadianceDigitalCinemaWrite:
                 "bit_depth": (BIT_DEPTHS, {"default": "32-bit Float"}),
                 "compression": (COMPRESSIONS, {"default": "ZIP"}),
                 "alpha_mode": (ALPHA_MODES, {"default": "From Image"}),
+                # ALBABIT-FIX: Audio export widgets placed before custom_metadata to avoid overlap
+                # with the multiline text area when these widgets are shown/hidden by the JS.
+                "write_external_audio_file": (AUDIO_EXPORT_FORMATS, {
+                    "default": "None",
+                    "tooltip": (
+                        "Export a separate audio file alongside the output. "
+                        "In Video mode, audio is always embedded as AAC in the container — "
+                        "this additionally exports a lossless copy. "
+                        "In Sequence or Single Image mode, this is the only way to preserve the audio track."
+                    ),
+                }),
+                "audio_filename_suffix": ("STRING", {
+                    "default": "_audio",
+                    "tooltip": (
+                        "Suffix added to filename_prefix for the exported audio file. "
+                        "The file is saved in the same output folder as the image/video "
+                        "(e.g. prefix + '_audio' → 'MyShot_audio.wav')."
+                    ),
+                }),
                 "custom_metadata": ("STRING", {"default": "", "multiline": True}),
             },
             "hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
         }
+    
 
     RETURN_TYPES = ()
     RETURN_NAMES = ()
@@ -392,10 +433,11 @@ class RadianceDigitalCinemaWrite:
         return {}
 
 class RadianceWrite:
-    def write(self, image, filename_prefix, write_mode="Video", output_format="", fps=24.0, quality=10, 
-              output_color_space="sRGB (Standard)", broadcast_safe=True, audio=None, 
-              output_path="", start_frame=1, bit_depth="32-bit Float", compression="ZIP", 
-              alpha_mode="From Image", custom_metadata="", prompt=None, extra_pnginfo=None):
+    def write(self, image, filename_prefix, write_mode="Video", output_format="", fps=24.0, quality=10,
+              output_color_space="sRGB (Standard)", broadcast_safe=True, audio=None,
+              output_path="", start_frame=1, bit_depth="32-bit Float", compression="ZIP",
+              alpha_mode="From Image", custom_metadata="", write_external_audio_file="None",
+              audio_filename_suffix="_audio", prompt=None, extra_pnginfo=None):
         
         if hasattr(image, "get_components"): image = image.get_components().images
         elif isinstance(image, dict) and "samples" in image: image = image["samples"]
@@ -411,6 +453,11 @@ class RadianceWrite:
         images_np = images_out.cpu().numpy()
         ts = int(time.time())
 
+        # ALBABIT-FIX: Export audio as a separate file when a non-None format is selected.
+        # Useful for image sequence outputs which do not carry an audio track.
+        if write_external_audio_file != "None" and audio is not None:
+            self._write_audio_file(audio, write_external_audio_file, filename_prefix, audio_filename_suffix, full_out, ts)
+
         # Build Metadata
         meta = {
             "software": "Radiance v2.3",
@@ -423,8 +470,16 @@ class RadianceWrite:
                     k, v = line.split("=", 1)
                     meta[k.strip()] = v.strip()
 
-        if write_mode == "Video" and any(x in output_format for x in ["Video", "GIF", "WEBP"]):
+        # ALBABIT-FIX: GIF/WEBP are no longer in the Video group — they route to _write_animated().
+        # Animated variants ("GIF — Animated", "WEBP — Animated") are Sequence-mode only.
+        # Static variants ("GIF", "WEBP") are Single Image-mode only.
+        is_animated_fmt = "GIF" in output_format or "WEBP" in output_format
+        if write_mode == "Video" and "Video" in output_format:
             res = self._write_video(images_np, filename_prefix, output_format, fps, quality, output_color_space, full_out, ts, audio, broadcast_safe)
+        elif is_animated_fmt and write_mode == "Sequence":
+            res = self._write_animated(images_np, filename_prefix, output_format, output_dir=full_out, ts=ts, fps=fps, quality=quality, is_single_image=False)
+        elif is_animated_fmt and write_mode == "Single Image":
+            res = self._write_animated(images_np[:1], filename_prefix, output_format, output_dir=full_out, ts=ts, fps=fps, quality=quality, is_single_image=True)
         elif write_mode == "Single Image":
             # For Single Image, we only take the first frame and save without sequence naming
             res = self._write_sequence(images_np[:1], filename_prefix, output_format, quality, full_out, ts, start_frame, 4, False, bit_depth, compression, meta, alpha_mode, is_single_image=True)
@@ -531,6 +586,92 @@ class RadianceWrite:
             self._mux_audio(fpath, audio)
         return fpath
 
+    # ALBABIT-FIX: Write animated GIF or WEBP (Sequence mode) and static GIF/WEBP (Single Image mode).
+    # imageio.v3 handles both cases — duration is derived from fps for animated output.
+    def _write_animated(self, images_np, prefix, fmt, output_dir, ts, fps=24.0, quality=80, is_single_image=False):
+        import imageio.v3 as iio
+        try:
+            is_gif  = "GIF"  in fmt
+            ext     = ".gif" if is_gif else ".webp"
+            fname   = f"{prefix}{ext}" if is_single_image else f"{prefix}_{ts}{ext}"
+            fpath   = os.path.join(output_dir, fname)
+            os.makedirs(output_dir, exist_ok=True)
+            frames_u8     = (np.clip(images_np, 0, 1) * 255).astype(np.uint8)
+            duration_ms   = int(1000.0 / max(fps, 1.0))
+            n_frames      = len(frames_u8)
+            if is_gif:
+                # GIF: palette-quantised 8-bit — imageio.v3 auto-quantises each frame
+                iio.imwrite(fpath, frames_u8, duration=duration_ms, loop=0)
+            else:
+                # WEBP: lossy by default; quality 0-100 maps directly to imageio quality param
+                iio.imwrite(fpath, frames_u8, duration=duration_ms, loop=0, quality=int(quality))
+            label = "GIF" if is_gif else "WEBP"
+            logger.info(f"◎ {label} written: {fpath} ({n_frames} frame{'s' if n_frames != 1 else ''})")
+            return fpath
+        except Exception as e:
+            logger.error(f"[RadianceWrite] Animated write failed ({fmt}): {e}")
+            return ""
+
+    # ALBABIT-FIX: Export audio as a separate file in the format selected by audio_export.
+    # WAV 32-bit Float is handled in pure Python; all other formats use ffmpeg for conversion.
+    def _write_audio_file(self, audio, fmt, prefix, suffix, output_dir, ts):
+        try:
+            import struct
+            waveform = audio.get("waveform")
+            sr = audio.get("sample_rate", 44100)
+            if waveform is None: return
+
+            wav_np = waveform.squeeze(0).cpu().numpy()  # shape: (channels, samples)
+            n_channels = wav_np.shape[0]
+            os.makedirs(output_dir, exist_ok=True)
+            # Interleaved float32 LE — used as pipe input for ffmpeg-based formats
+            raw_f32 = wav_np.T.flatten().astype(np.float32).tobytes()
+
+            if "32-bit Float" in fmt:
+                # Pure Python WAV — no ffmpeg dependency
+                data_size = len(raw_f32)
+                block_align = n_channels * 4
+                wav_path = os.path.join(output_dir, f"{prefix}_{ts}{suffix}.wav")
+                with open(wav_path, "wb") as f:
+                    f.write(b"RIFF" + struct.pack("<I", 36 + data_size) +
+                            b"WAVEfmt " + struct.pack("<IHHIIHH", 16, 3, n_channels, sr,
+                            sr * block_align, block_align, 32) +
+                            b"data" + struct.pack("<I", data_size) + raw_f32)
+                logger.info(f"◎ Audio exported: {wav_path}")
+                return
+
+            # All other formats use ffmpeg (pipe raw f32le → target codec/container)
+            if "WAV" in fmt and "24-bit" in fmt:
+                out_path = os.path.join(output_dir, f"{prefix}_{ts}{suffix}.wav")
+                codec = "pcm_s24le"
+            elif "WAV" in fmt and "16-bit" in fmt:
+                out_path = os.path.join(output_dir, f"{prefix}_{ts}{suffix}.wav")
+                codec = "pcm_s16le"
+            elif "AIFF" in fmt:
+                out_path = os.path.join(output_dir, f"{prefix}_{ts}{suffix}.aiff")
+                codec = "pcm_s24be"  # AIFF uses big-endian PCM
+            elif "FLAC" in fmt:
+                out_path = os.path.join(output_dir, f"{prefix}_{ts}{suffix}.flac")
+                codec = "flac"
+            else:
+                logger.warning(f"[RadianceWrite] Unknown audio_export format: {fmt}")
+                return
+
+            cmd = [
+                "ffmpeg", "-y",
+                "-f", "f32le", "-ar", str(sr), "-ac", str(n_channels),
+                "-i", "pipe:0",
+                "-c:a", codec,
+                out_path,
+            ]
+            result = subprocess.run(cmd, input=raw_f32, capture_output=True, timeout=120)  # nosec B603
+            if result.returncode != 0:
+                logger.error(f"[RadianceWrite] Audio export failed ({fmt}):\n{result.stderr.decode(errors='replace')}")
+            else:
+                logger.info(f"◎ Audio exported: {out_path}")
+        except Exception as e:
+            logger.error(f"[RadianceWrite] Failed to export audio ({fmt}): {e}")
+
     def _write_sequence(self, images_np, prefix, fmt, quality, output_dir, ts, start, padding, use_ts, bdepth, comp, meta, alpha_mode, is_single_image=False):
         if is_single_image:
             target = output_dir
@@ -543,7 +684,7 @@ class RadianceWrite:
             # If base file exists, find next version index
             if os.path.exists(os.path.join(target, f"{prefix}{ext}")):
                 v_prefix = f"{prefix}_v"
-                idx = get_next_index(target, v_prefix, ext, 1)
+                idx = get_next_index(target, v_prefix, ext)
                 if idx == 0: idx = 2 # Start at v2 if no _vN files exist yet
                 prefix = f"{v_prefix}{idx}"
         else:
@@ -602,11 +743,11 @@ class RadianceWrite:
         except: pass
 
 NODE_CLASS_MAPPINGS = {
-    "◎ RadianceDigitalCinemaRead": RadianceDigitalCinemaRead,
-    "◎ RadianceDigitalCinemaWrite": RadianceDigitalCinemaWrite,
+    "RadianceDigitalCinemaRead": RadianceDigitalCinemaRead,
+    "RadianceDigitalCinemaWrite": RadianceDigitalCinemaWrite,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "◎ RadianceDigitalCinemaRead": "◎ Radiance Read",
-    "◎ RadianceDigitalCinemaWrite": "◎ Radiance Write",
+    "RadianceDigitalCinemaRead": "◎ Radiance Read",
+    "RadianceDigitalCinemaWrite": "◎ Radiance Write",
 }

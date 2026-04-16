@@ -900,6 +900,17 @@ class RadianceVAE4KEncode:
                         "tooltip": "Overlap between tiles in pixels. 128px optimal for cosine blending.",
                     },
                 ),
+                # ALBABIT-FIX: Temporal inputs for 3D VAEs (LTX 2.3)
+                "temporal_size": (
+                    "INT", 
+                    {"default": 64, "min": 0, "max": 1024, "step": 4, 
+                     "tooltip": "Temporal chunk size for 3D VAEs (e.g. LTX 2.3). 0 = disable temporal tiling."}
+                ),
+                "temporal_overlap": (
+                    "INT", 
+                    {"default": 4, "min": 0, "max": 64, "step": 1, 
+                     "tooltip": "Temporal overlap for 3D VAEs to prevent flickering."}
+                ),
                 "exposure": (
                     "FLOAT",
                     {
@@ -1513,6 +1524,17 @@ class RadianceVAE4KDecode:
                         "tooltip": "Overlap between tiles. 128px optimal for cosine blending.",
                     },
                 ),
+                # ALBABIT-FIX: Temporal inputs for 3D VAEs (LTX 2.3)
+                "temporal_size": (
+                    "INT", 
+                    {"default": 64, "min": 0, "max": 1024, "step": 4, 
+                     "tooltip": "Temporal chunk size for 3D VAEs (e.g. LTX 2.3). 0 = disable temporal tiling."}
+                ),
+                "temporal_overlap": (
+                    "INT", 
+                    {"default": 4, "min": 0, "max": 64, "step": 1, 
+                     "tooltip": "Temporal overlap for 3D VAEs to prevent flickering."}
+                ),
                 "exposure_adjust": (
                     "FLOAT",
                     {
@@ -1657,6 +1679,57 @@ class RadianceVAE4KDecode:
         "11 color spaces, video 5D support, auto-crop from radiance_meta."
     )
 
+    # ALBABIT-FIX: New Temporal Decoding engine for 3D VAEs (e.g., LTX 2.3)
+    def _temporal_decode(self, latent_chunk: torch.Tensor, vae: Any, t_size: int, t_overlap: int) -> torch.Tensor:
+        """
+        Decodes a 5D latent chunk temporally, applying cosine blending across
+        overlapping frame regions to prevent flickering and CUDA OOM.
+        """
+        B, C, F, H, W = latent_chunk.shape
+        if t_size <= 0 or F <= t_size:
+            return vae.decode(latent_chunk).float().cpu()
+            
+        stride = t_size - t_overlap
+        output = None
+        weights = None
+        
+        pos = 0
+        while pos < F:
+            chunk_end = min(pos + t_size, F)
+            chunk_start = max(0, chunk_end - t_size)
+            chunk_lat = latent_chunk[:, :, chunk_start:chunk_end, :, :]
+            
+            with torch.no_grad():
+                chunk_dec = vae.decode(chunk_lat).float().cpu()
+                
+            # Handle ComfyUI returning 4D if Batch=1 internally
+            if chunk_dec.ndim == 4:
+                chunk_dec = chunk_dec.reshape(B, chunk_end - chunk_start, chunk_dec.shape[1], chunk_dec.shape[2], chunk_dec.shape[3])
+            
+            if output is None:
+                _, _, H_out, W_out, C_out = chunk_dec.shape
+                output = torch.zeros((B, F, H_out, W_out, C_out), dtype=torch.float32, device="cpu")
+                weights = torch.zeros((1, F, 1, 1, 1), dtype=torch.float32, device="cpu")
+                
+            chunk_f = chunk_end - chunk_start
+            w_ramp = torch.ones((1, chunk_f, 1, 1, 1), dtype=torch.float32, device="cpu")
+            if chunk_start > 0 and t_overlap > 0:
+                ramp = torch.sin(torch.linspace(0, math.pi / 2, t_overlap, device="cpu")) ** 2
+                w_ramp[0, :t_overlap, 0, 0, 0] = ramp
+            if chunk_end < F and t_overlap > 0:
+                ramp = torch.cos(torch.linspace(0, math.pi / 2, t_overlap, device="cpu")) ** 2
+                w_ramp[0, -t_overlap:, 0, 0, 0] = ramp
+                
+            output[:, chunk_start:chunk_end, :, :, :] += chunk_dec * w_ramp
+            weights[:, chunk_start:chunk_end, :, :, :] += w_ramp
+            
+            if chunk_end >= F:
+                break
+            pos += stride
+            
+        output = output / torch.clamp(weights, min=1e-3)
+        return output
+
     def _tiled_decode(
         self,
         samples: Dict[str, Any],
@@ -1665,6 +1738,8 @@ class RadianceVAE4KDecode:
         overlap_px: int,
         pbar: Any = None,
         vae_factor: int = 8,
+        temporal_size: int = 64,  # ALBABIT-FIX: Added temporal args
+        temporal_overlap: int = 4, # ALBABIT-FIX: Added temporal args
     ) -> torch.Tensor:
         """
         Decode full latent in overlapping tiles with cosine blend.
@@ -1732,7 +1807,11 @@ class RadianceVAE4KDecode:
                 # Decode on GPU — defensive no_grad: idempotent if caller has it,
                 # protective if _tiled_decode is ever invoked standalone.
                 with torch.no_grad():
-                    tile_decoded = vae.decode(tile_lat).float().cpu()
+                    # ALBABIT-FIX: Route through temporal decoder if latent is 5D (3D VAE)
+                    if tile_lat.ndim == 5:
+                        tile_decoded = self._temporal_decode(tile_lat, vae, temporal_size, temporal_overlap)
+                    else:
+                        tile_decoded = vae.decode(tile_lat).float().cpu()
 
                 # FIX-4: 3D (temporal) VAEs return (B, F, H, W, C) — a 5D tensor.
                 # Reshape to (B*F, H, W, C) so all downstream accumulation logic
@@ -2140,6 +2219,8 @@ class RadianceVAE4KDecode:
         processing_mode: str = "sequential",
         force_hdr_decode: bool = False,
         hdr_output: bool = False,
+        temporal_size: int = 64,  # ALBABIT-FIX: Added temporal args
+        temporal_overlap: int = 4, # ALBABIT-FIX: Added temporal args
     ) -> Tuple:
         """v2.3 TRUE-HDR: Universal decode with 32-bit HDR output support.
 
@@ -2267,6 +2348,8 @@ class RadianceVAE4KDecode:
                     processing_mode=processing_mode,
                     force_hdr_decode=force_hdr_decode,
                     hdr_output=hdr_output,
+                    temporal_size=temporal_size,    # ALBABIT-FIX: Passed to recursive loop
+                    temporal_overlap=temporal_overlap,
                 )
                 decoded_frames.append(decoded_frame)
 
@@ -2335,7 +2418,12 @@ class RadianceVAE4KDecode:
         decoded_video_frames = None  # Set when 3D VAE returns 5D output
         with torch.no_grad():
             if pix_h <= ts_px and pix_w <= ts_px:
-                img = vae.decode(latent).float()
+                # ALBABIT-FIX: Temporal Decoding applied to non-spatial-tiled branch
+                if is_3d_vae and latent.ndim == 5:
+                    img = self._temporal_decode(latent, vae, temporal_size, temporal_overlap)
+                else:
+                    img = vae.decode(latent).float()
+                
                 # FIX-4: 3D (temporal) VAEs return (B, F, H, W, C) — reshape to
                 # (B*F, H, W, C) so downstream code handles it as a frame batch.
                 if img.ndim == 5:
@@ -2344,7 +2432,11 @@ class RadianceVAE4KDecode:
                     img = img.reshape(_B5 * _F5, _H5, _W5, _C5)
                 pbar.update_absolute(100, 100)
             else:
-                img, _tiled_video_frames = self._tiled_decode(samples, vae, ts_px, overlap, pbar, vae_factor=vae_factor)
+                # ALBABIT-FIX: Passed temporal args
+                img, _tiled_video_frames = self._tiled_decode(
+                    samples, vae, ts_px, overlap, pbar, vae_factor=vae_factor,
+                    temporal_size=temporal_size, temporal_overlap=temporal_overlap
+                )
                 if _tiled_video_frames is not None:
                     decoded_video_frames = _tiled_video_frames
 

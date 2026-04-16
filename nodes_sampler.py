@@ -564,33 +564,42 @@ def compute_base_sigmas(
     flux_shift: float,
     denoise: float,
     cache: SigmaCache,
+    force_full_denoise: bool = False, 
+    force_exact_steps: bool = False, 
 ) -> torch.Tensor:
 
-    cached = cache.get(model, scheduler_name, total_steps)
+    # ALBABIT-FIX: Properly define how many schedule steps to generate conceptually.
+    if force_exact_steps and 0.0 < denoise < 1.0:
+        calc_steps = max(1, int(round(total_steps / denoise)))
+    else:
+        calc_steps = total_steps
+
+    cached = cache.get(model, scheduler_name, calc_steps)
     if cached is not None:
         bs = cached
     else:
-
         ms = model.get_model_object("model_sampling")
-        bs = comfy.samplers.calculate_sigmas(ms, scheduler_name, total_steps)
+        bs = comfy.samplers.calculate_sigmas(ms, scheduler_name, calc_steps)
 
         if flux_shift != 1.0 and scheduler_name != primary_scheduler:
             bs = flux_shift_sigmas(bs, flux_shift)
 
         bs = correct_sigma_end(bs)
+        cache.put(model, scheduler_name, calc_steps, bs)
 
-        assert len(bs) == total_steps + 1, (
-            f"compute_base_sigmas: schedule length {len(bs)} != steps+1 "
-            f"({total_steps + 1}) for scheduler '{scheduler_name}'. "
-            f"A sigma correction may have appended instead of replacing."
-        )
-
-        cache.put(model, scheduler_name, total_steps, bs)
-
+    # ALBABIT-FIX: ALWAYS truncate the schedule based on denoise. 
+    # force_full does NOT bypass truncation, it only forces the final value to 0.0 later
     if denoise < 1.0:
-        n = len(bs) - 1
-        if n > 0:
-            bs = bs[max(0, int(n * (1.0 - denoise))):]
+        if force_exact_steps:
+            bs = bs[-(total_steps + 1):]
+        else:
+            n = len(bs) - 1
+            if n > 0:
+                start_step = max(0, int(n * (1.0 - denoise)))
+                bs = bs[start_step:]
+                
+    if force_full_denoise and len(bs) > 0:
+        bs[-1] = 0.0
 
     return bs
 
@@ -611,7 +620,7 @@ WORKFLOW_PRESETS = [
     "▶ WAN txt2vid (30 steps)",
     "▶ WAN img2vid (20 steps)",
     "▶ LTX-Video (25 steps)",
-    "▶ LTX 2.3 LowRes (32 steps)",                                                
+    "▶ LTX 2.3 LowRes (20 steps)",                                                
     "▶ LTX 2.3 HighRes (40 steps)",                                                     
     "▶ HunyuanVideo (30 steps)",
 
@@ -746,15 +755,15 @@ PRESET_CONFIGS: Dict[str, Dict[str, Any]] = {
         "flux_guidance": 0.0,
     },
 
-    "▶ LTX 2.3 LowRes (32 steps)": {
-        "steps": 32,
+    "▶ LTX 2.3 LowRes (20 steps)": {
+        "steps": 20, 
         "cfg": 3.0,
         "sampler": "euler",
         "scheduler": "beta",
         "denoise": 1.0,
         "flux_shift": 3.0,
         "flux_guidance": 0.0,
-        "force_full_denoise_steps": True,
+        "terminal_sigma_to_zero": True,
         "force_exact_steps": True,
         "model_type": "ltxav",
     },
@@ -766,7 +775,7 @@ PRESET_CONFIGS: Dict[str, Dict[str, Any]] = {
         "denoise": 0.45,
         "flux_shift": 6.0,
         "flux_guidance": 0.0,
-        "force_full_denoise_steps": True,
+        "terminal_sigma_to_zero": True,
         "force_exact_steps": True,
         "model_type": "ltxav",
     },
@@ -868,15 +877,19 @@ def get_flux_sigmas(
     if shift != 1.0:
         sigmas = flux_shift_sigmas(sigmas, shift)
 
-    if denoise < 1.0 and not force_full:
+    # ALBABIT-FIX: ALWAYS truncate the schedule based on denoise. 
+    # force_full does NOT prevent truncation, it only ensures the last sigma is 0.0
+    if denoise < 1.0:
         if force_exact:
-
             sigmas = sigmas[-(steps + 1):]
         else:
             total_s = len(sigmas) - 1
             if total_s > 0:
                 start_step = max(0, int(total_s * (1.0 - denoise)))
                 sigmas = sigmas[start_step:]
+                
+        if force_full and len(sigmas) > 0:
+            sigmas[-1] = 0.0
 
     return sigmas
 
@@ -1100,7 +1113,7 @@ def build_sigma_report(
     video_tag = f" | Frames: {frames}" if frames is not None and frames > 1 else ""
     lines = [
         f"═══ Radiance Sampler Pro v4.2 ═══",
-        f"Model: {detected_type} | Steps: {steps} | Scheduler: {scheduler}{'  [AYS]' if ays_active else ''}{video_tag}",
+        f"Model: {detected_type} | Target Steps: {steps} | Scheduler: {scheduler}{'  [AYS]' if ays_active else ''}{video_tag}",
         f"Shift: {flux_shift} | Denoise: {denoise} | Mode: {sampler_mode}",
     ]
 
@@ -1115,10 +1128,11 @@ def build_sigma_report(
     if stage_timings:
         lines.append("─── Per-Stage Timing ───")
         for stage_num, s_start, s_end, samp, t in stage_timings:
+            # ALBABIT-FIX: Display 1-based step counts for user clarity (1 to N) instead of 0-based
             stage_steps = s_end - s_start
             speed = stage_steps / t if t > 0.001 else 0
             lines.append(
-                f"  Stage {stage_num}: steps {s_start}→{s_end} [{samp}] "
+                f"  Stage {stage_num}: Steps {s_start + 1}→{s_end} [{samp}] "
                 f"= {t:.3f}s ({speed:.1f} it/s)"
             )
 
@@ -1683,26 +1697,17 @@ class RadianceSamplerPro:
                      "tooltip": "Seam blending method. feather=cosine fade, gaussian=bell curve, average=uniform."},
                 ),
 
-                "force_full_denoise_steps": (
+                "terminal_sigma_to_zero": (
                     "BOOLEAN",
                     {"default": False,
-                     "tooltip": ""},
+                     "tooltip": "Ensure terminal step reaches zero noise even on truncated image-to-image runs. Vital for Flow Matching models."},
                 ),
                 "force_exact_steps": (
                     "BOOLEAN",
                     {"default": False,
-                     "tooltip": ""},
+                     "tooltip": "Ensure precise step count in image-to-image runs, adjusting calculations rather than purely truncating stages."},
                 ),
-                "video_normalization_factors": (
-                    "STRING",
-                    {"default": "1,1,1,1,1,1,1,1",
-                     "tooltip": ""},
-                ),
-                "audio_normalization_factors": (
-                    "STRING",
-                    {"default": "1,1,0.25,1,1,0.25,1,1",
-                     "tooltip": ""},
-                ),
+                # ALBABIT-FIX: Removed UI normalization factors entirely. Native LTX handles recombination cleanly.
             },
             "optional": {
                 "refiner_model": ("MODEL",),
@@ -1795,13 +1800,10 @@ class RadianceSamplerPro:
         latent_format: str = "",
         positive_2: Optional[List] = None,
 
-        force_full_denoise_steps: bool = False,
+        terminal_sigma_to_zero: bool = False,
         force_exact_steps: bool = False,
-        video_normalization_factors: str = "1,1,1,1,1,1,1,1",
-        audio_normalization_factors: str = "1,1,0.25,1,1,0.25,1,1",
     ) -> Tuple[Dict[str, torch.Tensor], torch.Tensor, str, str]:
 
-        # ALBABIT-FIX: Console alert for sigmas_override
         if sigmas_override is not None:
             print("\033[93m[Radiance] sigmas_override connected. UI parameters for Steps, Denoise, Scheduler, and Shift will be IGNORED. The sampler will strictly follow the external sigmas schedule.\033[0m")
             logger.warning("[Radiance] sigmas_override is active and will take precedence.")
@@ -1817,21 +1819,10 @@ class RadianceSamplerPro:
                 is_ltx_av = True
                 ltxav_obj = inner_model
                 logger.info(
-                    "[Radiance] LTX-AV detected. Volume adjustment will be applied at the end of the phase."
+                    "[Radiance] LTX-AV detected. Latents will be processed natively."
                 )
         except Exception:
             pass                                      
-
-        try:
-            v_norm = [float(f.strip()) for f in video_normalization_factors.split(",")]
-        except ValueError:
-            logger.warning("[Radiance] video_normalization_factors parse failed — using 1.0")
-            v_norm = [1.0]
-        try:
-            a_norm = [float(f.strip()) for f in audio_normalization_factors.split(",")]
-        except ValueError:
-            logger.warning("[Radiance] audio_normalization_factors parse failed — using 0.25")
-            a_norm = [0.25]
 
         gc.collect()
         if torch.cuda.is_available():
@@ -1900,10 +1891,6 @@ class RadianceSamplerPro:
                 logger.warning(
                     f"[Radiance] LTX 2.3: uni_pc + {scheduler} can cause severe structural "
                     f"instability or 'melting' artifacts in motion. Proceed with caution."
-                )
-            if sampler == "euler_cfg_pp" and force_full_denoise_steps:
-                logger.warning(
-                    "[Radiance] 'euler_cfg_pp' sampler is extremely aggressive when 'force_full_denoise_steps' is True. It is highly recommended to disable 'force_full_denoise_steps' or use 'euler' instead."
                 )
 
             if noise_type.lower() not in ("gaussian", "uniform"):
@@ -1995,6 +1982,10 @@ class RadianceSamplerPro:
             logger.debug("[Radiance] Auto-reshaped noise_mask 4D→5D to match video latent.")
 
         t0 = time.time()
+        
+        # ALBABIT-FIX: Ensure total_steps accurately reflects the requested steps if not overridden
+        target_total_steps = steps
+
         if sigmas_override is not None:
             sigmas = sigmas_override.to(device if hasattr(device, '__str__') else "cpu")
             logger.info(
@@ -2003,6 +1994,7 @@ class RadianceSamplerPro:
             )
 
             sigmas = correct_sigma_end(sigmas)
+            target_total_steps = max(1, len(sigmas) - 1)
         else:
             try:
                 if ays_schedule:
@@ -2025,13 +2017,13 @@ class RadianceSamplerPro:
                         )
                         sigmas = get_flux_sigmas(
                             model, scheduler, steps, denoise, flux_shift,
-                            force_full=force_full_denoise_steps,
+                            force_full=terminal_sigma_to_zero,
                             force_exact=force_exact_steps,
                         )
                 else:
                     sigmas = get_flux_sigmas(
                         model, scheduler, steps, denoise, flux_shift,
-                        force_full=force_full_denoise_steps,
+                        force_full=terminal_sigma_to_zero,
                         force_exact=force_exact_steps,
                     )
 
@@ -2064,19 +2056,13 @@ class RadianceSamplerPro:
         work_latent = latent_samples.to(device)
         log_tensor("Work Latent (Start)", work_latent)
 
-        # ALBABIT-FIX: Sync total_steps to sigmas_override if provided to prevent indexer mismatch
-        if sigmas_override is not None:
-            total_steps = max(1, len(sigmas) - 1)
-        else:
-            total_steps = max(1, steps)
-
         if multi_cond_mode != "Off" and positive_2 is not None:
             positive = merge_conditionings(
                 positive, positive_2,
                 mode=multi_cond_mode,
                 weight_b=cond_weight_b,
-                split_step=int(total_steps * phase_split),
-                total_steps=total_steps,
+                split_step=int(target_total_steps * phase_split),
+                total_steps=target_total_steps,
             )
             logger.info(f"[v4.0] Conditionings merged (mode={multi_cond_mode}, weight_b={cond_weight_b:.2f})")
 
@@ -2090,8 +2076,8 @@ class RadianceSamplerPro:
         secondary_scheduler: Optional[str] = None
         split_step = -1
 
-        effective_end = end_step if end_step > 0 else total_steps
-        effective_end = min(effective_end, total_steps)
+        effective_end = end_step if end_step > 0 else target_total_steps
+        effective_end = min(effective_end, target_total_steps)
         effective_start = min(start_step, effective_end)
 
         splits = {effective_start, effective_end}
@@ -2164,7 +2150,7 @@ class RadianceSamplerPro:
             else:
                 secondary_sampler = sampler
 
-            split_step = int(total_steps * max(0.0, min(1.0, phase_split)))
+            split_step = int(target_total_steps * max(0.0, min(1.0, phase_split)))
 
             if effective_start < split_step < effective_end:
                 splits.add(split_step)
@@ -2173,14 +2159,14 @@ class RadianceSamplerPro:
                     phase2_label = f"{phase2_label}+{secondary_scheduler}"
                 logger.info(
                     f"Phase-Shift: {primary_sampler} (0-{split_step}) → "
-                    f"{phase2_label} ({split_step}-{total_steps})"
+                    f"{phase2_label} ({split_step}-{target_total_steps})"
                 )
 
                 if sigma_blend_steps > 0:
                     logger.info(f"Sigma blend: {sigma_blend_steps} steps at transition")
 
         if refiner_model is not None:
-            refiner_step = max(0, min(refiner_start_step, total_steps))
+            refiner_step = max(0, min(refiner_start_step, target_total_steps))
             if effective_start < refiner_step < effective_end:
                 splits.add(refiner_step)
                 logger.info(f"Refiner starts at step {refiner_step}")
@@ -2192,9 +2178,9 @@ class RadianceSamplerPro:
         if is_dynamic:
 
             denoising_steps = (
-                int(total_steps * denoise) if denoise < 1.0 else total_steps
+                int(target_total_steps * denoise) if denoise < 1.0 else target_total_steps
             )
-            denoising_start = total_steps - denoising_steps
+            denoising_start = target_total_steps - denoising_steps
 
             idx_20 = denoising_start + int(
                 denoising_steps * DYNAMIC_GUIDANCE_EARLY_THRESHOLD
@@ -2208,16 +2194,16 @@ class RadianceSamplerPro:
             if effective_start < idx_90 < effective_end:
                 splits.add(idx_90)
             logger.info(
-                f"Dynamic Guidance Active (effective range: steps {denoising_start}-{total_steps}, "
+                f"Dynamic Guidance Active (effective range: steps {denoising_start}-{target_total_steps}, "
                 f"early={idx_20}, late={idx_90})"
             )
 
         elif is_dynamic_cfg:
 
             denoising_steps = (
-                int(total_steps * denoise) if denoise < 1.0 else total_steps
+                int(target_total_steps * denoise) if denoise < 1.0 else target_total_steps
             )
-            denoising_start = total_steps - denoising_steps
+            denoising_start = target_total_steps - denoising_steps
 
             idx_15 = denoising_start + int(denoising_steps * DYNAMIC_CFG_EARLY_THRESHOLD)
             idx_85 = denoising_start + int(denoising_steps * DYNAMIC_CFG_LATE_THRESHOLD)
@@ -2228,7 +2214,7 @@ class RadianceSamplerPro:
                 splits.add(idx_85)
             logger.info(
                 f"Dynamic CFG Active for {detected_type} (effective range: steps "
-                f"{denoising_start}-{total_steps}, boost→{idx_15}, taper→{idx_85})"
+                f"{denoising_start}-{target_total_steps}, boost→{idx_15}, taper→{idx_85})"
             )
 
         sorted_splits = sorted(
@@ -2250,7 +2236,9 @@ class RadianceSamplerPro:
                     preview_method = "Latent2RGB"
 
             try:
-                pbar_ref = comfy.utils.ProgressBar(total_steps)
+                # ALBABIT-FIX: ProgressBar respects the actual iterations being run
+                actual_iterations = len(sigmas) - 1
+                pbar_ref = comfy.utils.ProgressBar(actual_iterations)
                 use_custom_preview = True
                 logger.debug(f"Preview callback active: {preview_method}")
             except (AttributeError, TypeError) as e:
@@ -2273,20 +2261,21 @@ class RadianceSamplerPro:
 
         try:
             _ms = model.get_model_object("model_sampling")
-            _untrimmed = comfy.samplers.calculate_sigmas(_ms, scheduler, total_steps)
+            _untrimmed = comfy.samplers.calculate_sigmas(_ms, scheduler, target_total_steps)
             if flux_shift != 1.0:
                 _untrimmed = flux_shift_sigmas(_untrimmed, flux_shift)
             _untrimmed = correct_sigma_end(_untrimmed)
-            _sigma_cache.put(model, scheduler, total_steps, _untrimmed)
+            _sigma_cache.put(model, scheduler, target_total_steps, _untrimmed)
         except Exception as _e:
             logger.debug(f"Pre-seed cache skipped: {_e}")
 
         def _get_base_sigmas(mdl, sched: str = scheduler) -> torch.Tensor:
-            # ALBABIT-FIX: Directly return the overridden sigmas to ensure SigmaIndexer matches sizes
-            if sigmas_override is not None and sched == scheduler and mdl is model:
+            if sched == scheduler and mdl is model:
                 return sigmas
             return compute_base_sigmas(
-                mdl, sched, total_steps, scheduler, flux_shift, denoise, _sigma_cache
+                mdl, sched, steps, scheduler, flux_shift, denoise, _sigma_cache,
+                force_full_denoise=terminal_sigma_to_zero,
+                force_exact_steps=force_exact_steps
             )
 
         t0 = time.time()
@@ -2335,13 +2324,14 @@ class RadianceSamplerPro:
             label = f"{ps.sampler_name}+{ps.scheduler_name}"
             if ps.is_blend_point:
                 label += " [blend]"
+            
+            # ALBABIT-FIX: Display logical 1-based steps for clarity in logs instead of 0-based
             logger.info(
-                f"Plan Stage {ps.index + 1}: steps {ps.global_start}→{ps.global_end} [{label}]"
+                f"Plan Stage {ps.index + 1}: Steps {ps.global_start + 1}→{ps.global_end} [{label}]"
             )
 
         try:
             if tile_mode and latent_samples.ndim == 4:
-                # FIX: tile_mode runs INSTEAD of the staged denoising loop.
                 logger.info(
                     f"[v4.0] Tile sampling: size={tile_size}, "
                     f"overlap={tile_overlap}, blend={tile_blend}"
@@ -2362,7 +2352,6 @@ class RadianceSamplerPro:
                     tile_blend=tile_blend,
                     noise_mask=noise_mask,
                 )
-                # ALBABIT-FIX: Prevent AttributeError on NestedTensor which lacks 'is_cuda'
                 if hasattr(current_latent, "is_cuda"):
                     samples = current_latent.cpu() if current_latent.is_cuda else current_latent
                 else:
@@ -2376,7 +2365,7 @@ class RadianceSamplerPro:
 
             for plan_idx, stage in enumerate(planned_stages):
                 if tile_mode and latent_samples.ndim == 4:
-                    break  # tile_sample already ran above
+                    break  
                 t_stage = time.time()
                 i = stage.index
                 s_start = stage.global_start
@@ -2388,7 +2377,7 @@ class RadianceSamplerPro:
                 stage_positive = positive
                 if is_dynamic:
                     effective_guidance = compute_dynamic_guidance(
-                        flux_guidance, s_start, total_steps, denoise
+                        flux_guidance, s_start, target_total_steps, denoise
                     )
                     stage_positive = apply_flux_guidance(positive, effective_guidance)
                     logger.debug(
@@ -2400,7 +2389,7 @@ class RadianceSamplerPro:
                     stage_positive = apply_flux_guidance(positive, flux_guidance)
 
                 logger.info(
-                    f"Stage {i+1}: Steps {s_start}-{s_end} | "
+                    f"Stage {i+1}: Steps {s_start + 1}-{s_end} | "
                     f"Sampler: {current_sampler} | Scheduler: {current_scheduler}"
                 )
 
@@ -2408,7 +2397,7 @@ class RadianceSamplerPro:
 
                     base_sigmas = _get_base_sigmas(current_model, current_scheduler)
 
-                    indexer = SigmaIndexer(total_steps, base_sigmas)
+                    indexer = SigmaIndexer(target_total_steps, base_sigmas)
                     stage_sigmas = indexer.get_stage_sigmas(s_start, s_end)
 
                     if stage_sigmas is None:
@@ -2454,7 +2443,7 @@ class RadianceSamplerPro:
                     elif is_dynamic_cfg:
 
                         effective_cfg = compute_dynamic_cfg(
-                            cfg, s_start, total_steps, denoise
+                            cfg, s_start, target_total_steps, denoise
                         )
                         logger.debug(
                             f"Dynamic CFG @ step {s_start}: {cfg:.2f} → {effective_cfg:.2f}"
@@ -2521,7 +2510,7 @@ class RadianceSamplerPro:
                         next_base = _get_base_sigmas(
                             next_stage.model, next_stage.scheduler_name
                         )
-                        next_indexer = SigmaIndexer(total_steps, next_base)
+                        next_indexer = SigmaIndexer(target_total_steps, next_base)
                         next_sigma = next_indexer.get_sigma_at(next_stage.global_start)
 
                         if (
@@ -2545,7 +2534,6 @@ class RadianceSamplerPro:
                     logger.error(f"Error in Stage {i+1}: {e}")
                     raise
 
-            # ALBABIT-FIX: Prevent AttributeError on NestedTensor which lacks 'is_cuda'
             if hasattr(current_latent, "is_cuda"):
                 samples = current_latent.cpu() if current_latent.is_cuda else current_latent
             else:
@@ -2553,7 +2541,6 @@ class RadianceSamplerPro:
 
             timings["sampling"] = time.time() - t0
 
-            # FIX: tile_mode 4D now handled earlier in the stage loop.
             if tile_mode and latent_samples.ndim == 5:
                 logger.warning(
                     "[Radiance] Tile sampling ignored for 5D video latents."
@@ -2579,16 +2566,10 @@ class RadianceSamplerPro:
                 else:
                     final_t_raw = final_t
 
+                # ALBABIT-FIX: Removed internal normalization multipliers entirely. LTX natively recombines.
                 v_s, a_s = ltxav_obj.separate_audio_and_video_latents(final_t_raw, None)
                 v_s = v_s.detach()
                 a_s = a_s.detach()
-
-                f_v = v_norm[-1] if v_norm else 1.0
-                f_a = a_norm[-1] if a_norm else 1.0
-                if f_v != 1.0:
-                    v_s = v_s * f_v
-                if f_a != 1.0:
-                    a_s = a_s * f_a
 
                 recombined = _NestedTensor(
                     ltxav_obj.recombine_audio_and_video_latents(v_s, a_s)
@@ -2599,10 +2580,7 @@ class RadianceSamplerPro:
                     samples = recombined
 
                 del v_s, a_s, final_t_raw
-                logger.info(
-                    f"[Radiance] LTX-AV normalization applied "
-                    f"(video×{f_v:.3f}, audio×{f_a:.3f})"
-                )
+                logger.info("[Radiance] LTX-AV recombination applied (native scaling).")
             except Exception as _av_err:
                 logger.warning(
                     f"[Radiance] LTX-AV recombination failed: {_av_err}. "
@@ -2616,12 +2594,12 @@ class RadianceSamplerPro:
         total_time = time.time() - t_start
 
         logger.info(
-            f"Sampling complete: {steps} steps, {total_time:.2f}s total, "
+            f"Sampling complete: {target_total_steps} total target steps, {total_time:.2f}s total, "
             f"{timings['sampling']:.2f}s sampling"
         )
         for stage_num, s_start_t, s_end_t, samp, t in stage_timings:
             logger.info(
-                f"  Stage {stage_num}: steps {s_start_t}→{s_end_t} [{samp}] = {t:.3f}s"
+                f"  Stage {stage_num}: steps {s_start_t + 1}→{s_end_t} [{samp}] = {t:.3f}s"
             )
 
         output_sigmas = (
@@ -2630,7 +2608,7 @@ class RadianceSamplerPro:
 
         sigma_report = build_sigma_report(
             detected_type,
-            steps,
+            target_total_steps,
             scheduler,
             flux_shift,
             denoise,
@@ -2645,7 +2623,7 @@ class RadianceSamplerPro:
 
         latent_meta = _build_latent_meta(
             detected_type=detected_type,
-            steps=steps,
+            steps=target_total_steps,
             scheduler=scheduler,
             flux_shift=flux_shift,
             denoise=denoise,

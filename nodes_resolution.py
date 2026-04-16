@@ -57,11 +57,19 @@ PRESETS: Dict[str, Tuple[int, int, str, str]] = {
     "WAN 480p 16:9 (832×480)": (832, 480, "WAN Video", "16:9"),
     "WAN Portrait (480×832)": (480, 832, "WAN Video", "9:16"),
     "WAN Square (512×512)": (512, 512, "WAN Video", "1:1"),
-    # ── FEATURE: LTX-Video (requires 32px alignment, lat=8) ──
-    "LTX 720p (1216×704)": (1216, 704, "LTX Video", "16:9"),
-    "LTX Portrait (704×1216)": (704, 1216, "LTX Video", "9:16"),
+    # ── FEATURE: LTX-Video (Standard 32px alignment) and (4x latent upscale Workflow - Base/4 alignment, lat=32).
+    # (Presets that are not labeled “4x latent upscale wf” are compatible with both workflows) ──
     "LTX Square (768×768)": (768, 768, "LTX Video", "1:1"),
-    "LTX 1080p (1920×1088)": (1920, 1088, "LTX Video", "16:9"),
+    "LTX Portrait (768×1024)": (768, 1024, "LTX Video", "3:4"),
+    "LTX 720p (1280×736)": (1280, 736, "LTX Video", "16:9 (Padded)"),
+    "LTX 720p (4x latent upscale wf) (1280×768)": (1280, 768, "LTX Video", "16:9 (Padded)"),
+    "LTX 1080p (1920×1088)": (1920, 1088, "LTX Video", "16:9 (Padded)"),
+    "LTX 1080p (4x latent upscale wf) (1920×1152)": (1920, 1152, "LTX Video", "16:9 (Padded)"),
+    "LTX 2K DCI (2048×1088)": (2048, 1088, "LTX Video", "1.90:1 (Padded)"),
+    # ALBABIT-FIX: Added 2K DCI for 4x latent upscale workflow (1152 is multiple of 128)
+    "LTX 2K DCI (4x latent upscale wf) (2048×1152)": (2048, 1152, "LTX Video", "1.90:1 (Padded)"),
+    "LTX 4K UHD (3840×2176)": (3840, 2176, "LTX Video", "16:9 (Padded)"),
+    "LTX 4K DCI (4096×2176)": (4096, 2176, "LTX Video", "1.90:1 (Padded)"),
     # ── FEATURE: HunyuanVideo ──
     "HunyuanVideo 720p (1280×720)": (1280, 720, "HunyuanVideo", "16:9"),
     "HunyuanVideo Portrait (720×1280)": (720, 1280, "HunyuanVideo", "9:16"),
@@ -74,7 +82,8 @@ VIDEO_PRESET_CATEGORIES = {"WAN Video", "LTX Video", "HunyuanVideo"}
 
 # FEATURE: Latent format string matching nodes_sampler.py latent_format input
 LATENT_FORMAT_MAP = {
-    "Auto (Flux 16ch)": "flux",
+    "Auto (Flux 16ch / LTXV)": "auto", 
+    "LTXV (128ch)": "ltxv",
     "Flux / SD3 (16ch)": "flux",
     "SDXL / SD 1.5 (4ch)": "sdxl",
 }
@@ -85,13 +94,14 @@ MP_ASPECT_RATIOS = [
     "2.39:1", "1.85:1", "9:16", "2:3", "3:4",
 ]
 
-MODEL_TYPES = ["Auto (Flux 16ch)", "Flux / SD3 (16ch)", "SDXL / SD 1.5 (4ch)"]
+MODEL_TYPES = ["Auto (Flux 16ch / LTXV)", "LTXV (128ch)", "Flux / SD3 (16ch)", "SDXL / SD 1.5 (4ch)"]
 
 ORIENTATIONS = ["As Preset", "Landscape", "Portrait", "Square"]
 
 # Latent channels per model type
 LATENT_CHANNELS = {
-    "Auto (Flux 16ch)": 16,
+    "Auto (Flux 16ch / LTXV)": 16,
+    "LTXV (128ch)": 128,
     "Flux / SD3 (16ch)": 16,
     "SDXL / SD 1.5 (4ch)": 4,
 }
@@ -486,7 +496,6 @@ def _render_preview_card(
     return img
 
 
-
 # ═══════════════════════════════════════════════════════════════════════════════
 #                        NODE IMPLEMENTATION
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -547,7 +556,7 @@ class RadianceResolution:
                 "model_type": (
                     MODEL_TYPES,
                     {
-                        "default": "Auto (Flux 16ch)",
+                        "default": "Auto (Flux 16ch / LTXV)",
                         "tooltip": (
                             "Determines latent channel count. "
                             "Flux/SD3 = 16 channels. SDXL/SD 1.5 = 4 channels."
@@ -570,21 +579,53 @@ class RadianceResolution:
                     "BOOLEAN",
                     {"default": False, "tooltip": "Enable video sequence mode (replaces batch parameter)."},
                 ),
+                "crop_to_broadcast_resolution": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "tooltip": "Calculate bounding box to crop padded resolutions (e.g., 1088 to 1080) for broadcast compliance."
+                    },
+                ),
+                # ALBABIT-FIX: Frame computation mode and duration input
+                "frame_computation": (
+                    ["Manual (Frames)", "Auto (Seconds)"],
+                    {"default": "Manual (Frames)"}
+                ),
+                "duration_seconds": (
+                    "FLOAT", 
+                    {
+                        "default": 5.0,
+                        "min": 0.1,
+                        "max": 120.0,
+                        "step": 0.1,
+                        "tooltip": "Target video duration in seconds."
+                    }
+                ),
                 "video_frames": (
                     "INT",
-                    {"default": 81, "min": 1, "max": 100000, "step": 1, "tooltip": "Total number of video frames."},
+                    {"default": 121,
+                     "min": 1,
+                     "max": 100000,
+                     "step": 1,
+                     "tooltip": "Total number of video frames."},
                 ),
                 "frame_rate": (
                     "FLOAT",
-                    {"default": 24.0, "min": 1.0, "max": 120.0, "step": 1.0, "tooltip": "Playback frame rate."},
+                    {"default": 24.0,
+                     "min": 1.0,
+                     "max": 120.0,
+                     "step": 1.0,
+                     "tooltip": "Playback frame rate."},
                 ),
+                # ALBABIT-FIX: Increased step precision to 0.01 to safely allow exact values like 0.25 from JS.
+                # Min is clamped at 0.1 to prevent zero-dimension latent crashes (e.g. 10px // 32 = 0).
                 "scale_factor": (
                     "FLOAT",
                     {
                         "default": 1.0,
-                        "min": 0.25,
+                        "min": 0.1,
                         "max": 4.0,
-                        "step": 0.25,
+                        "step": 0.01,
                         "tooltip": (
                             "Scale the resolution by this factor. "
                             "0.5 = half res, 2.0 = double res. Applied after preset/custom."
@@ -630,8 +671,8 @@ class RadianceResolution:
             },
         }
 
-    RETURN_TYPES = ("LATENT", "INT", "INT", "INT", "STRING", "FLOAT", "INT", "STRING", "FLOAT")
-    RETURN_NAMES = ("latent", "width", "height", "channels", "info", "frame_rate", "frame_count", "latent_format", "duration_sec")
+    RETURN_TYPES = ("LATENT", "INT", "INT", "INT", "STRING", "FLOAT", "INT", "STRING", "FLOAT", "BOUNDING_BOX")
+    RETURN_NAMES = ("latent", "width", "height", "channels", "info", "frame_rate", "frame_count", "latent_format", "duration_sec", "crop_bbox")
     OUTPUT_TOOLTIPS = (
         "Empty latent tensor at the selected resolution.",
         "Final image width (pixels).",
@@ -642,6 +683,7 @@ class RadianceResolution:
         "Total video frames (or batch size for images).",
         "Latent format string — wire to Sampler Pro latent_format input.",
         "Duration in seconds (video_frames / frame_rate). 0.0 for images.",
+        "Bounding box {'x': x, 'y': y, 'width': w, 'height': h} for ImageCropV2 node.",
     )
     FUNCTION = "generate"
     CATEGORY = "FXTD Studios/Radiance/Image"
@@ -663,6 +705,9 @@ class RadianceResolution:
         scale_factor: float = 1.0,
         latent_channels: int = 0,
         enable_video: bool = False,
+        crop_to_broadcast_resolution: bool = True,
+        frame_computation: str = "Manual (Frames)",
+        duration_seconds: float = 5.0,
         video_frames: int = 81,
         frame_rate: float = 24.0,
         mp_target: float = 0.0,
@@ -711,25 +756,69 @@ class RadianceResolution:
             latent_c = latent_channels
         else:
             latent_c = LATENT_CHANNELS.get(model_type, 16)
+            
+            # ALBABIT-FIX: Auto-detect LTX models based on the preset to force 128 channels
+            if model_type == "Auto (Flux 16ch / LTXV)" and "ltx" in preset.lower():
+                latent_c = 128
 
         # ── Determine if this is a video latent ──────────────────────────────────
         # FIX 2: Video models need 5D latent (1, C, T, H, W), not 4D (B, C, H, W)
         preset_category = PRESETS.get(preset, (0, 0, "", ""))[2]
         is_video_latent = enable_video and preset_category in VIDEO_PRESET_CATEGORIES
 
+        # ALBABIT-FIX: Intelligent frame calculation based on model architecture
+        if enable_video and frame_computation == "Auto (Seconds)":
+            raw_frames = duration_seconds * float(frame_rate)
+            
+            # Auto-detect the required temporal stride
+            if "LTX" in preset or "LTXV" in model_type:
+                stride = 8
+            elif "WAN" in preset or "Hunyuan" in preset:
+                stride = 4
+            else:
+                stride = 4 # Safe standard fallback for most 3D VAEs
+                
+            # Apply the standard 3D VAE equation: (n * stride) + 1
+            video_frames = max(1, int(round(raw_frames / stride)) * stride + 1)
+            logger.info(f"[RadianceResolution] Auto-Seconds: {duration_seconds}s @ {frame_rate}fps -> Aligned to {video_frames} frames (stride {stride})")
+
         actual_batch = video_frames if enable_video else batch_size
 
-        # ── Create empty latent ──
-        lat_h = h // LATENT_SCALE
-        lat_w = w // LATENT_SCALE
+        # ── Create empty latent (ALBABIT-FIX: Smart VAE Compression for Video & Image) ──
+        # Default scales for Image models (Flux, SDXL, SD 1.5)
+        spatial_scale = 8
+        temporal_scale = 1
+        
+        if is_video_latent:
+            preset_lower = preset.lower()
+            # LTX-Video 2.3: Extreme 32x spatial and 8x temporal compression
+            if "ltx" in preset_lower:
+                spatial_scale = 32
+                temporal_scale = 8
+            # WAN (2.1/2.2) and HunyuanVideo: Standard 8x spatial and 4x temporal compression
+            elif any(k in preset_lower for k in ["wan", "hunyuan"]):
+                spatial_scale = 8
+                temporal_scale = 4
+            # Fallback for other potential video models
+            else:
+                spatial_scale = 8
+                temporal_scale = 4
+
+        # Apply spatial scaling based on pixels
+        lat_h = h // spatial_scale
+        lat_w = w // spatial_scale
 
         if is_video_latent:
-            # FIX 2: 5D tensor for WAN/HunyuanVideo/LTX — (batch=1, C, T, H, W)
-            latent = torch.zeros(1, latent_c, actual_batch, lat_h, lat_w, dtype=torch.float32)
-            logger.info(f"[RadianceResolution] Video latent 5D: (1, {latent_c}, {actual_batch}, {lat_h}, {lat_w})")
+            # ALBABIT-FIX: Calculate temporal latent frames (T) based on 3D VAE block equation: (Frames - 1) // Scale + 1
+            lat_t = (actual_batch - 1) // temporal_scale + 1
+            
+            # Create 5D tensor: (Batch=1, Channels, Time, Height, Width)
+            latent = torch.zeros(1, latent_c, lat_t, lat_h, lat_w, dtype=torch.float32)
+            logger.info(f"[RadianceResolution] Video latent 5D: (1, {latent_c}, {lat_t}, {lat_h}, {lat_w})")
         else:
-            # 4D for image/non-video-model paths: (B, C, H, W)
+            # Standard 4D tensor for images: (Batch, Channels, Height, Width)
             latent = torch.zeros(actual_batch, latent_c, lat_h, lat_w, dtype=torch.float32)
+            logger.info(f"[RadianceResolution] Image latent 4D: ({actual_batch}, {latent_c}, {lat_h}, {lat_w})")
 
         latent_dict = {"samples": latent}
 
@@ -804,11 +893,44 @@ class RadianceResolution:
         # FEATURE: duration in seconds for video; 0.0 for images
         duration_sec = float(video_frames) / float(frame_rate) if enable_video else 0.0
 
+        # ALBABIT-FIX: Calculate Crop Parameters based on FULL resolution (ignoring scale_factor)
+        # We must compute the crop targets based on the unscaled dimensions
+        if preset != "Custom" and preset in PRESETS:
+            full_w, full_h, _, _ = PRESETS[preset]
+        else:
+            full_w, full_h = width, height
+            
+        full_w, full_h = _apply_orientation(full_w, full_h, orientation)
+        full_w, full_h = _align8(full_w), _align8(full_h)
+        
+        target_w = full_w
+        target_h = full_h
+        crop_x = 0
+        crop_y = 0
+
+        # Only apply crop logic if it's a video and the broadcast crop option is active
+        if enable_video and crop_to_broadcast_resolution:
+            # ALBABIT-FIX: Compare against FULL resolution standards
+            if full_h in [1088, 1152] and full_w in [1920, 2048]:  # 1080p / 2K DCI
+                target_h = 1080
+            elif full_h in [736, 768] and full_w == 1280:          # 720p
+                target_h = 720
+            elif full_h == 2176 and full_w in [3840, 4096]:        # 4K
+                target_h = 2160
+            
+            # Center the crop based on full resolution
+            if full_w != target_w or full_h != target_h:
+                crop_x = (full_w - target_w) // 2
+                crop_y = (full_h - target_h) // 2
+
+        # Format Bounding Box for the final image size (100% scale)
+        crop_bbox = {"x": crop_x, "y": crop_y, "width": target_w, "height": target_h}
+
         return {
             "ui": {
                 "images": preview_images,
             },
-            "result": (latent_dict, w, h, latent_c, info, actual_fps, actual_batch, latent_fmt, duration_sec),
+            "result": (latent_dict, w, h, latent_c, info, actual_fps, actual_batch, latent_fmt, duration_sec, crop_bbox),
         }
 
 

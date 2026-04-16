@@ -66,8 +66,8 @@ const PRESET_CONFIGS = {
         denoise: 1.0, flux_shift: 2.37, flux_guidance: 0.0,
         description: "LTX-V standard — shift=2.37 per spec.",
     },
-    "▶ LTX 2.3 LowRes (32 steps)": {
-        steps: 32, start_step: 0, end_step: 0, cfg: 3.0, sampler: "euler", 
+    "▶ LTX 2.3 LowRes (20 steps)": {
+        steps: 20, start_step: 0, end_step: 0, cfg: 3.0, sampler: "euler", 
         sampler_mode: "Standard", phase_split: 0.0, scheduler: "beta", 
         scheduler_mode: "Manual", denoise: 1.0, flux_shift: 3.0, 
         flux_guidance: 0.0, flux_guidance_profile: "Static", add_noise: true, 
@@ -76,8 +76,8 @@ const PRESET_CONFIGS = {
         guidance_rescale_phi: 0.0, preview_method: "None", noise_type: "Gaussian", 
         multi_cond_mode: "Off", cond_weight_b: 0.0, conditioning_clip_target: "Auto", 
         tile_mode: false, refiner_start_step: 0, latent_format: "", 
-        force_full_denoise_steps: true, force_exact_steps: true, terminal_sigma: 0.0,
-        description: "LTX 2.3 LowRes.",
+        terminal_sigma_to_zero: true, force_exact_steps: true,
+        description: "Optimal settings for LowRes first phase.",
     },
     "▶ LTX 2.3 HighRes (40 steps)": {
         steps: 40, start_step: 0, end_step: 0, cfg: 3.0, sampler: "euler", 
@@ -89,8 +89,8 @@ const PRESET_CONFIGS = {
         guidance_rescale_phi: 0.0, preview_method: "None", noise_type: "Gaussian", 
         multi_cond_mode: "Off", cond_weight_b: 0.0, conditioning_clip_target: "Auto", 
         tile_mode: false, refiner_start_step: 0, latent_format: "", 
-        force_full_denoise_steps: true, force_exact_steps: true, terminal_sigma: 0.0,
-        description: "High-Res upscale without LoRA. Uses Euler by default. If you're using a LoRA, you can plug in “sigmas_override” and adjust your settings accordingly.",
+        terminal_sigma_to_zero: true, force_exact_steps: true,
+        description: "Optimal settings for HighRes post latent upscale phase.",
     },
     "▶ HunyuanVideo (30 steps)": {
         steps: 30, cfg: 6.0, sampler: "euler", scheduler: "simple",
@@ -135,7 +135,7 @@ const PRESET_CONFIGS = {
 };
 
 const LTX_PRESETS = [
-    "▶ LTX 2.3 LowRes (32 steps)",
+    "▶ LTX 2.3 LowRes (20 steps)",
     "▶ LTX 2.3 HighRes (40 steps)"
 ];
 
@@ -149,6 +149,38 @@ const LTX_INCOMPATIBLE_WIDGETS = [
     "tile_stride",
     "tile_blend"
 ];
+
+// ALBABIT-FIX: Function to physically hide/show widgets instead of just greying them out
+function setWidgetVisible(widget, visible) {
+    if (!widget) return;
+    if (visible) {
+        if (widget.type === "hidden") {
+            widget.type = widget._origType || "INT";
+            widget.computeSize = widget._origComputeSize || (() => [200, 20]);
+            
+            // ALBABIT-FIX: Restore original draw method if it existed, otherwise fallback to ComfyUI default
+            if (widget._origDraw !== undefined) {
+                widget.draw = widget._origDraw;
+                delete widget._origDraw;
+            } else {
+                delete widget.draw;
+            }
+        }
+    } else {
+        if (widget.type !== "hidden") {
+            widget._origType = widget.type;
+            widget._origComputeSize = widget.computeSize;
+            widget.type = "hidden";
+            widget.computeSize = () => [0, -4];
+            
+            // ALBABIT-FIX: Inject an empty draw function to completely mute text bleeding/overlap from hidden widgets
+            if (widget.draw) {
+                widget._origDraw = widget.draw;
+            }
+            widget.draw = function() {}; 
+        }
+    }
+}
 
 function updateUILocks(node, presetName) {
     if (!node.widgets) return;
@@ -180,11 +212,6 @@ function updateUILocks(node, presetName) {
         }
     });
 
-    const multiCondWidget = node.widgets.find(w => w.name === "multi_cond_mode");
-    if (multiCondWidget && multiCondWidget.callback) {
-        multiCondWidget.callback(multiCondWidget.value);
-    }
-
     node.setDirtyCanvas(true, true);
 }
 
@@ -197,14 +224,36 @@ function applyPreset(node, presetName) {
     const widgets = node.widgets;
     if (!widgets) return;
 
+    // Apply values silently without triggering loops
     for (const widget of widgets) {
         if (config[widget.name] !== undefined) {
             widget.value = config[widget.name];
-            if (widget.callback) widget.callback(config[widget.name]);
         }
     }
 
+    const multiCondWidget = node.widgets.find(w => w.name === "multi_cond_mode");
+    if (multiCondWidget && multiCondWidget.callback) {
+        multiCondWidget.callback(multiCondWidget.value);
+    }
+
     node.setDirtyCanvas(true);
+}
+
+// ALBABIT-FIX: Function to safely extract tracking values
+function getTrackedState(node) {
+    const state = {};
+    if (!node.widgets) return state;
+    const trackedFields = [
+        "steps", "cfg", "sampler", "scheduler", "denoise", 
+        "flux_shift", "flux_guidance", "force_exact_steps", 
+        "terminal_sigma_to_zero"
+    ];
+    for (const w of node.widgets) {
+        if (trackedFields.includes(w.name)) {
+            state[w.name] = w.value;
+        }
+    }
+    return state;
 }
 
 function exportPreset(node) {
@@ -302,6 +351,7 @@ app.registerExtension({
         if (nodeData.name !== "RadianceSamplerPro") return;
 
         const onNodeCreated = nodeType.prototype.onNodeCreated;
+        const onPropertyChanged = nodeType.prototype.onPropertyChanged;
 
         nodeType.prototype.onNodeCreated = function () {
             if (onNodeCreated) onNodeCreated.apply(this, arguments);
@@ -312,8 +362,78 @@ app.registerExtension({
             const presetWidget = this.widgets?.find(w => w.name === "preset");
             if (!presetWidget) return;
 
+            // Find widgets for dynamic toggling
             const multiCondWidget = this.widgets?.find(w => w.name === "multi_cond_mode");
             const weightBWidget = this.widgets?.find(w => w.name === "cond_weight_b");
+            
+            const tileModeW      = this.widgets?.find(w => w.name === "tile_mode");
+            const tileSizeW      = this.widgets?.find(w => w.name === "tile_size");
+            const tileOverlapW   = this.widgets?.find(w => w.name === "tile_overlap");
+            const tileBlendW     = this.widgets?.find(w => w.name === "tile_blend");
+
+            // Master function to toggle interface visibility
+            const toggleDynamicFields = () => {
+                if (multiCondWidget && weightBWidget) {
+                    const isMulti = multiCondWidget.value !== "Off";
+                    setWidgetVisible(weightBWidget, isMulti);
+                }
+
+                if (tileModeW) {
+                    const isTile = tileModeW.value === true || tileModeW.value === "true" || tileModeW.value === "True";
+                    setWidgetVisible(tileSizeW, isTile);
+                    setWidgetVisible(tileOverlapW, isTile);
+                    setWidgetVisible(tileBlendW, isTile);
+                }
+
+                if (this.computeSize) {
+                    const sz = this.computeSize();
+                    if (this.size[0] < sz[0]) this.size[0] = sz[0];
+                    if (this.size[1] < sz[1]) this.size[1] = sz[1];
+                    app.graph.setDirtyCanvas(true, true);
+                }
+            };
+
+            // ALBABIT-FIX: Smart function to check cable AND bypass/mute state of upstream node
+            this.checkSigmaConnection = () => {
+                let isConnectedAndActive = false;
+                const sigmasInput = this.inputs?.find(inp => inp.name === "sigmas_override");
+                
+                if (sigmasInput && sigmasInput.link) {
+                    const link = app.graph.links[sigmasInput.link];
+                    if (link) {
+                        const originNode = app.graph.getNodeById(link.origin_id);
+                        // Mode 2 = Muted (Never), Mode 4 = Bypassed
+                        // Mode 0 = Always (Active)
+                        if (originNode && originNode.mode !== 2 && originNode.mode !== 4) {
+                            isConnectedAndActive = true;
+                        }
+                    }
+                }
+                
+                // ALBABIT-FIX: Grab all schedule-related widgets to disable when sigmas_override is active
+                const stepsW         = this.widgets?.find(w => w.name === "steps");
+                const denoiseW       = this.widgets?.find(w => w.name === "denoise");
+                const schedulerW     = this.widgets?.find(w => w.name === "scheduler");
+                const fluxShiftW     = this.widgets?.find(w => w.name === "flux_shift");
+                const schedulerModeW = this.widgets?.find(w => w.name === "scheduler_mode");
+                const startStepW     = this.widgets?.find(w => w.name === "start_step");
+                const endStepW       = this.widgets?.find(w => w.name === "end_step");
+                const terminalSigmaW = this.widgets?.find(w => w.name === "terminal_sigma_to_zero");
+                const aysScheduleW   = this.widgets?.find(w => w.name === "ays_schedule");
+
+                // Only update if state changed (avoids UI flickering since this runs constantly)
+                if (stepsW && stepsW.disabled !== isConnectedAndActive) stepsW.disabled = isConnectedAndActive;
+                if (denoiseW && denoiseW.disabled !== isConnectedAndActive) denoiseW.disabled = isConnectedAndActive;
+                if (schedulerW && schedulerW.disabled !== isConnectedAndActive) schedulerW.disabled = isConnectedAndActive;
+                if (fluxShiftW && fluxShiftW.disabled !== isConnectedAndActive) fluxShiftW.disabled = isConnectedAndActive;
+                if (schedulerModeW && schedulerModeW.disabled !== isConnectedAndActive) schedulerModeW.disabled = isConnectedAndActive;
+                
+                // ALBABIT-FIX: Disable start/end steps and schedule overrides since custom sigmas dictate the exact timeline
+                if (startStepW && startStepW.disabled !== isConnectedAndActive) startStepW.disabled = isConnectedAndActive;
+                if (endStepW && endStepW.disabled !== isConnectedAndActive) endStepW.disabled = isConnectedAndActive;
+                if (terminalSigmaW && terminalSigmaW.disabled !== isConnectedAndActive) terminalSigmaW.disabled = isConnectedAndActive;
+                if (aysScheduleW && aysScheduleW.disabled !== isConnectedAndActive) aysScheduleW.disabled = isConnectedAndActive;
+            };
 
             if (multiCondWidget && weightBWidget) {
                 const origMultiCb = multiCondWidget.callback;
@@ -321,25 +441,25 @@ app.registerExtension({
                     if (origMultiCb) origMultiCb.apply(this, arguments);
                     
                     const disableWeight = (val === "Off");
-                    weightBWidget.disabled = disableWeight;
                     
-                    if (weightBWidget.inputEl) {
-                        weightBWidget.inputEl.disabled = disableWeight;
-                        weightBWidget.inputEl.style.opacity = disableWeight ? "0.4" : "1.0";
-                        weightBWidget.inputEl.style.pointerEvents = disableWeight ? "none" : "auto";
-                    }
-
                     if (disableWeight) {
                         if (window.app && !window.app.configuringGraph) weightBWidget.value = 0.0;
                     } else {
                         if (window.app && !window.app.configuringGraph && weightBWidget.value === 0.0) weightBWidget.value = 0.5;
                     }
+                    toggleDynamicFields();
                 };
                 setTimeout(() => multiCondWidget.callback(multiCondWidget.value), 150);
             }
 
-            // ALBABIT-FIX: Replaced the floating div logic with a native embedded text widget
-            // Added serialize: false to stop the bug where it gets duplicated on workflow reload
+            if (tileModeW) {
+                const origTile = tileModeW.callback;
+                tileModeW.callback = function () {
+                    if (origTile) origTile.apply(this, arguments);
+                    toggleDynamicFields();
+                };
+            }
+
             let descWidget = this.widgets?.find(w => w.name === "preset_info");
             if (!descWidget) {
                 descWidget = this.addWidget("text", "preset_info", "", () => { }, {
@@ -371,33 +491,72 @@ app.registerExtension({
                 }
             };
 
+            let lastPresetValue = presetWidget.value;
+
+            // ALBABIT-FIX: Corrected Preset callback to properly handle "None (Custom)" unlock
             const originalCallback = presetWidget.callback;
             presetWidget.callback = (value) => {
                 if (originalCallback) originalCallback.call(presetWidget, value);
                 
-                if (window.app && window.app.configuringGraph) {
-                    updateUILocks(this, value);
-                    updateDescription(value);
-                    return;
-                }
+                if (window.app && window.app.configuringGraph) return;
 
-                setTimeout(() => {
-                    applyPreset(this, value);
+                if (value !== lastPresetValue) {
+                    lastPresetValue = value;
+                    
+                    // Only inject values if we didn't select Custom
+                    if (value !== "None (Custom)") {
+                        applyPreset(this, value);
+                    }
+                    
+                    // But ALWAYS update locks and layout so Custom un-greys everything!
                     updateUILocks(this, value);
                     updateDescription(value);
-                }, 10);
+                    toggleDynamicFields();
+                }
+            };
+
+            this.onPropertyChanged = function (property, value, prevValue) {
+                if (onPropertyChanged) onPropertyChanged.apply(this, arguments);
+
+                if (window.app && window.app.configuringGraph) return;
+
+                const pWidget = this.widgets?.find(wd => wd.name === "preset");
+                if (!pWidget || pWidget.value === "None (Custom)") return;
+                
+                const currentPreset = PRESET_CONFIGS[pWidget.value];
+                if (currentPreset && currentPreset[property] !== undefined) {
+                    if (currentPreset[property] != value) {
+                        console.log(`[Radiance Sampler] Manual override detected on '${property}'. Switching to Custom.`);
+                        pWidget.value = "None (Custom)";
+                        lastPresetValue = "None (Custom)";
+                        updateUILocks(this, "None (Custom)");
+                        updateDescription("None (Custom)");
+                        this.setDirtyCanvas(true);
+                    }
+                }
             };
 
             setTimeout(() => {
                 const val = presetWidget.value;
                 if (val) {
-                    if (val !== "None (Custom)" && !(window.app && window.app.configuringGraph)) {
-                        applyPreset(this, val);
-                    }
+                    lastPresetValue = val; 
                     updateUILocks(this, val);
                     updateDescription(val);
                 }
+                toggleDynamicFields();
             }, 100);
+        };
+
+        // ALBABIT-FIX: Use onDrawBackground instead of onConnectionsChange.
+        // This ensures the node constantly checks if the upstream node is bypassed (Ctrl+B) or muted (Ctrl+M)
+        const origOnDrawBackground = nodeType.prototype.onDrawBackground;
+        nodeType.prototype.onDrawBackground = function (ctx) {
+            if (origOnDrawBackground) origOnDrawBackground.apply(this, arguments);
+            
+            // Evaluates the Bypass/Mute state seamlessly in real-time
+            if (this.checkSigmaConnection) {
+                this.checkSigmaConnection();
+            }
         };
     }
 });
