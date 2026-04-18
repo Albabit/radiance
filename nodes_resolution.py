@@ -887,8 +887,15 @@ class RadianceResolution:
 
         # FEATURE: latent_format string — wire to Sampler Pro latent_format input
         latent_fmt = LATENT_FORMAT_MAP.get(model_type, "flux" if latent_c >= 16 else "sdxl")
+        # ALBABIT-FIX: When latent_channels is manually overridden, derive format from channel count.
+        # Previous code mapped any >=16ch to "flux", which was wrong for LTXV (128ch).
         if latent_channels > 0:
-            latent_fmt = "flux" if latent_c >= 16 else "sdxl"
+            if latent_c >= 128:
+                latent_fmt = "ltxv"
+            elif latent_c >= 16:
+                latent_fmt = "flux"
+            else:
+                latent_fmt = "sdxl"
 
         # FEATURE: duration in seconds for video; 0.0 for images
         duration_sec = float(video_frames) / float(frame_rate) if enable_video else 0.0

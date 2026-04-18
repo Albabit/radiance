@@ -1940,11 +1940,16 @@ class RadianceSamplerPro:
 
         if latent_format:
 
+            # ALBABIT-FIX: Extended channel validation to handle LTX-Video 128ch latent.
+            # Previous code mapped all "ltx*" to 16ch, triggering false warnings for LTXV.
             fmt_lower = latent_format.lower()
-            expected_ch = 16 if any(k in fmt_lower for k in (
-                "flux", "sd3", "16ch", "wan", "ltx", "hunyuan",
-                "z_image", "lumina",                                               
-            )) else 4
+            if any(k in fmt_lower for k in ("128ch", "ltxav", "ltxv")):
+                expected_ch = 128
+            elif any(k in fmt_lower for k in ("flux", "sd3", "16ch", "wan", "hunyuan",
+                                               "z_image", "lumina")):
+                expected_ch = 16
+            else:
+                expected_ch = 4
             if channels != expected_ch:
                 logger.warning(
                     f"[v4.0] Latent has {channels} channels but latent_format='{latent_format}' "

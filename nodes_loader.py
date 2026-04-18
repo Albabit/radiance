@@ -242,8 +242,8 @@ LATENT_CHANNELS = {
     "flux":           16,
     "sd3":            16,
     "sd3.5":          16,
-    "ltx":            16,
-    "ltxav":          16, # ALBABIT-FIX: ensure LTX 2.3 gets 16 channels mapping
+    "ltx":            128, # ALBABIT-FIX: LTX-Video (all versions) video latent = 128ch
+    "ltxav":          128, # ALBABIT-FIX: LTX-Video 2.3 AV — video latent = 128ch (fp8 included)
     "hunyuan_video":  16,
     "wan":            16,
     "lumina2":        16,
@@ -272,8 +272,8 @@ def _latent_format(arch: str) -> str:
         "flux":           "flux_16ch",
         "sd3":            "sd3_16ch",
         "sd3.5":          "sd3_16ch",
-        "ltx":            "ltx_16ch",
-        "ltxav":          "ltx_16ch", # ALBABIT-FIX: Format label
+        "ltx":            "ltx_128ch",   # ALBABIT-FIX: LTX-Video video latent = 128ch
+        "ltxav":          "ltxav_128ch", # ALBABIT-FIX: LTX-Video 2.3 AV video latent = 128ch
         "hunyuan_video":  "hunyuan_16ch",
         "wan":            "wan_16ch",
         "lumina2":        "lumina_16ch",
