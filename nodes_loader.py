@@ -444,7 +444,6 @@ CHECKPOINT_PRESETS = {
         "clip_slots":    {"t5xxl": True},
         "vram_gb":       12,
     },
-    # ALBABIT-FIX: Reordered 13B preset to be below base LTX
     "→ LTX Video 13B": {
         "model_type":    "ltx",
         "weight_dtype":  "fp8_e4m3fn",

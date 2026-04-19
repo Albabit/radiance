@@ -192,12 +192,16 @@ app.registerExtension({
 					const isSeqLike  = isSequence || isSingle;
 
 					// ALBABIT-FIX: Dynamic quality label reflects the active codec's quality scale.
+					// ALBABIT-FIX: Hide quality when the selected format ignores it entirely
+					// (EXR, PNG, ProRes, Radiance HDR). Only H.264/H.265, JPEG, and WEBP use it.
+					const qualityUsed = is_crf || is_jpg || is_webp;
 					if (qualityWidget) {
 						qualityWidget.label = is_crf
 							? "quality (CRF)"
 							: (is_jpg || is_webp) ? "quality (0–100)"
 							: "quality";
 					}
+					setWidgetVisible(qualityWidget, qualityUsed);
 
 					// FPS only relevant for video
 					setWidgetVisible(fpsWidget, isVideo);

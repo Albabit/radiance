@@ -226,6 +226,9 @@ class RadianceDepthMapGenerator:
 
             outputs = model(**inputs)
             depth = outputs.predicted_depth  # (1, model_H, model_W)
+            # ALBABIT-FIX: Delete outputs and inputs immediately to free GPU memory
+            # after each frame — prevents VRAM accumulation across the full batch.
+            del outputs, inputs
 
             # Interpolate to original spatial size.
             # predicted_depth: (1, mH, mW) → unsqueeze → (1, 1, mH, mW)
@@ -239,7 +242,10 @@ class RadianceDepthMapGenerator:
             )
             depth = depth.squeeze(1).squeeze(0)  # → (H, W)
 
-            raw_depths.append(depth)
+            # ALBABIT-FIX: Move each depth tensor to CPU immediately instead of
+            # accumulating all frames in VRAM. At 1920×1088 × 241 frames the GPU
+            # peak reached ~12 GB, causing OOM alongside the LTX 2.3 model (~23 GB).
+            raw_depths.append(depth.cpu())
 
             if is_video and (i + 1) % 10 == 0:
                 logger.info(f"  Depth frame {i + 1}/{batch_size}")

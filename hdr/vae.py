@@ -1549,6 +1549,21 @@ class RadianceVAE4KDecode:
                     "IMAGE",
                     {"tooltip": "Alpha channel from Radiance VAE 4K Encode."},
                 ),
+                # ALBABIT-FIX: Accept crop_bbox from RadianceResolution to apply broadcast
+                # resolution crop (e.g. 1920×1088 → 1920×1080) directly inside the decode node,
+                # replacing the need for an external ImageCropV2 node downstream.
+                # forceInput=True keeps this as a connector socket — no inline x/y/width/height fields.
+                "crop_bbox": (
+                    "BOUNDING_BOX",
+                    {
+                        "forceInput": True,
+                        "tooltip": (
+                            "Bounding box from Radiance Resolution (crop_bbox output). "
+                            "When connected, crops the decoded image to the broadcast "
+                            "resolution defined by crop_to_broadcast_resolution in that node."
+                        ),
+                    },
+                ),
                 "hdr_mode": (
                     ["Clip (SDR)", "Soft Clip", "Compress (Log)", "Passthrough"],
                     {
@@ -2221,6 +2236,7 @@ class RadianceVAE4KDecode:
         hdr_output: bool = False,
         temporal_size: int = 64,  # ALBABIT-FIX: Added temporal args
         temporal_overlap: int = 4, # ALBABIT-FIX: Added temporal args
+        crop_bbox: dict = None,    # ALBABIT-FIX: Optional broadcast crop from RadianceResolution
     ) -> Tuple:
         """v2.3 TRUE-HDR: Universal decode with 32-bit HDR output support.
 
@@ -2505,6 +2521,16 @@ class RadianceVAE4KDecode:
             crop_w = img.shape[2] - pad_w
             img = img[:, :crop_h, :crop_w, :]
             logger.info(f"[Radiance 4K v2.3] Cropped padding: {pad_h}h, {pad_w}w → {crop_w}×{crop_h}")
+
+        # ALBABIT-FIX: Apply broadcast resolution crop from RadianceResolution crop_bbox output.
+        # Replaces the need for an external ImageCropV2 node downstream.
+        if crop_bbox:
+            bx = int(crop_bbox.get("x", 0))
+            by = int(crop_bbox.get("y", 0))
+            bw = int(crop_bbox.get("width", img.shape[2]))
+            bh = int(crop_bbox.get("height", img.shape[1]))
+            img = img[:, by:by + bh, bx:bx + bw, :]
+            logger.info(f"[Radiance 4K Decode] crop_bbox applied: {bw}×{bh} at ({bx},{by})")
 
         # Restore alpha
         if alpha is not None:

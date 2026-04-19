@@ -221,13 +221,21 @@ class RadianceDigitalCinemaRead:
                     break
             exr_file.close()
             return img, alpha_img, depth_img
-        except: pass
+        except ImportError:
+            pass
+        except Exception as e:
+            logger.warning(f"⚠ OpenEXR: could not read '{file_path}': {e}")
 
         try:
             import imageio.v3 as iio
             img = iio.imread(file_path)
             return np.asarray(img, dtype=np.float32), None, None
-        except: pass
+        except ImportError:
+            pass
+        except Exception as e:
+            logger.warning(f"⚠ imageio: could not read '{file_path}': {e}")
+
+        logger.warning(f"⚠ No EXR backend could read '{file_path}' — frame skipped.")
         return None, None, None
 
     def read(self, source_path, start_frame, frame_limit, input_colorspace, fps_override=0.0):
@@ -517,7 +525,7 @@ class RadianceDigitalCinemaWrite:
         return {}
 
 class RadianceWrite:
-    def write(self, image, filename_prefix, write_mode="Video", output_format="", fps=24.0, quality=10,
+    def write(self, image, filename_prefix, write_mode="Video", output_format="", fps=24.0, quality=80,
               output_color_space="sRGB (Standard)", broadcast_safe=True, audio=None,
               output_path="", start_frame=1, bit_depth="32-bit Float", compression="ZIP",
               alpha_mode="From Image", custom_metadata="", write_external_audio_file="None",
