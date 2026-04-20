@@ -63,8 +63,18 @@ const FORMAT_GROUPS = {
 //                                            that still call their draw() even when "hidden".
 //   3. inputEl/element display:none        — hides the actual DOM node for customtext (STRING)
 //                                            widgets, which are absolutely-positioned over the canvas.
-function setWidgetVisible(widget, visible) {
+// ALBABIT-FIX: Added node parameter to support Nodes 2.0 Vue reactive widget hiding.
+// Nodes 2.0 uses widget.options.hidden to filter widgets from Vue rendering
+// (confirmed in ComfyUI frontend source: t.filter(e=>!(e.options?.hidden||...)))
+function setWidgetVisible(widget, visible, node) {
 	if (!widget) return;
+
+	// ALBABIT-FIX: Nodes 2.0 primary mechanism — options.hidden filters widget from Vue render list
+	if (!widget.options) widget.options = {};
+	widget.options.hidden = !visible;
+
+	// Classic LiteGraph canvas: widget.hidden drives getLayoutWidgets() exclusion
+	widget.hidden = !visible;
 	if (visible) {
 		if (widget.type === "hidden") {
 			widget.type = widget._origType || "text";
@@ -85,11 +95,21 @@ function setWidgetVisible(widget, visible) {
 			// Restore DOM visibility for STRING/customtext widgets
 			if (widget.inputEl) widget.inputEl.style.display = "";
 			if (widget.element)  widget.element.style.display  = "";
+			// ALBABIT-FIX: Restore saved computedHeight for Nodes 2.0 Vue layout.
+			// If the widget was hidden before Vue's first layout pass, fall back to 32 (standard row height).
+			if (widget._origComputedHeight !== undefined) {
+				widget.computedHeight = widget._origComputedHeight;
+				delete widget._origComputedHeight;
+			} else {
+				widget.computedHeight = 32;
+			}
 		}
 	} else {
 		if (widget.type !== "hidden") {
 			widget._origType       = widget.type;
 			widget._origComputeSize = widget.computeSize;
+			// ALBABIT-FIX: Save computedHeight so the show path can restore it exactly
+			widget._origComputedHeight = widget.computedHeight;
 			widget.type = "hidden";
 			widget.computeSize = () => [0, -4];
 			// Mute draw to prevent text bleeding on hidden STRING widgets
@@ -98,8 +118,13 @@ function setWidgetVisible(widget, visible) {
 			// Hide DOM node for STRING/customtext widgets
 			if (widget.inputEl) widget.inputEl.style.display = "none";
 			if (widget.element)  widget.element.style.display  = "none";
+			// ALBABIT-FIX: Nodes 2.0 — set computedHeight=4 so Vue CSS height becomes 0px (collapses widget)
+			widget.computedHeight = 4;
 		}
 	}
+	// ALBABIT-FIX: Always splice to trigger Vue reactive proxy re-evaluation of options.hidden,
+	// even when widget.type was never "hidden" (e.g. showing a widget on fresh node load)
+	if (node?.widgets) node.widgets.splice(0, 0);
 }
 
 function refreshNodeSize(node) {
@@ -201,24 +226,25 @@ app.registerExtension({
 							: (is_jpg || is_webp) ? "quality (0–100)"
 							: "quality";
 					}
-					setWidgetVisible(qualityWidget, qualityUsed);
+					// ALBABIT-FIX: Pass node for Nodes 2.0 Vue reactive widget hiding
+					setWidgetVisible(qualityWidget, qualityUsed, node);
 
 					// FPS only relevant for video
-					setWidgetVisible(fpsWidget, isVideo);
+					setWidgetVisible(fpsWidget, isVideo, node);
 
 					// Start frame only relevant for sequences
-					setWidgetVisible(startFrameWidget, isSequence);
+					setWidgetVisible(startFrameWidget, isSequence, node);
 
 					// EXR/PNG-specific controls only in sequence/single modes
-					setWidgetVisible(bitDepthWidget,    isSeqLike && (is_exr || is_png));
-					setWidgetVisible(compressionWidget, isSeqLike && is_exr);
-					setWidgetVisible(alphaModeWidget,   isSeqLike);
-					setWidgetVisible(metadataWidget,    isSeqLike);
+					setWidgetVisible(bitDepthWidget,    isSeqLike && (is_exr || is_png), node);
+					setWidgetVisible(compressionWidget, isSeqLike && is_exr, node);
+					setWidgetVisible(alphaModeWidget,   isSeqLike, node);
+					setWidgetVisible(metadataWidget,    isSeqLike, node);
 
 					// ALBABIT-FIX: Audio suffix is only relevant when an export format is selected.
 					// audio_export itself is always visible (can also save audio alongside a video).
 					const audioExportValue = audioExportWidget ? audioExportWidget.value : "None";
-					setWidgetVisible(audioSuffixWidget, audioExportValue !== "None");
+					setWidgetVisible(audioSuffixWidget, audioExportValue !== "None", node);
 
 					refreshNodeSize(node);
 				};

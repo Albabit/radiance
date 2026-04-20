@@ -150,36 +150,67 @@ const LTX_INCOMPATIBLE_WIDGETS = [
     "tile_blend"
 ];
 
-// ALBABIT-FIX: Function to physically hide/show widgets instead of just greying them out
-function setWidgetVisible(widget, visible) {
+// ALBABIT-FIX: Added node parameter to support Nodes 2.0 Vue reactive widget hiding.
+// Nodes 2.0 uses widget.options.hidden to filter widgets from Vue rendering
+// (confirmed in ComfyUI frontend source: t.filter(e=>!(e.options?.hidden||...)))
+function setWidgetVisible(widget, visible, node) {
     if (!widget) return;
+
+    // ALBABIT-FIX: Nodes 2.0 primary mechanism — options.hidden filters widget from Vue render list
+    if (!widget.options) widget.options = {};
+    widget.options.hidden = !visible;
+
+    // Classic LiteGraph canvas: widget.hidden drives getLayoutWidgets() exclusion
+    widget.hidden = !visible;
+
     if (visible) {
         if (widget.type === "hidden") {
             widget.type = widget._origType || "INT";
-            widget.computeSize = widget._origComputeSize || (() => [200, 20]);
-            
-            // ALBABIT-FIX: Restore original draw method if it existed, otherwise fallback to ComfyUI default
+            // ALBABIT-FIX: Delete computeSize override so LiteGraph prototype recalculates correct height
+            if (widget._origComputeSize !== undefined) {
+                widget.computeSize = widget._origComputeSize;
+            } else {
+                delete widget.computeSize;
+            }
+            delete widget._origComputeSize;
+
+            // ALBABIT-FIX: Restore original draw method if it existed, otherwise fall back to default
             if (widget._origDraw !== undefined) {
                 widget.draw = widget._origDraw;
                 delete widget._origDraw;
             } else {
                 delete widget.draw;
             }
+            // ALBABIT-FIX: Restore saved computedHeight for Nodes 2.0 Vue layout.
+            // If the widget was hidden before Vue's first layout pass, fall back to 32 (standard row height).
+            if (widget._origComputedHeight !== undefined) {
+                widget.computedHeight = widget._origComputedHeight;
+                delete widget._origComputedHeight;
+            } else {
+                widget.computedHeight = 32;
+            }
         }
     } else {
         if (widget.type !== "hidden") {
             widget._origType = widget.type;
             widget._origComputeSize = widget.computeSize;
+            // ALBABIT-FIX: Save computedHeight so the show path can restore it exactly
+            widget._origComputedHeight = widget.computedHeight;
             widget.type = "hidden";
             widget.computeSize = () => [0, -4];
-            
-            // ALBABIT-FIX: Inject an empty draw function to completely mute text bleeding/overlap from hidden widgets
+
+            // ALBABIT-FIX: Inject an empty draw to mute text bleeding on hidden canvas widgets
             if (widget.draw) {
                 widget._origDraw = widget.draw;
             }
-            widget.draw = function() {}; 
+            widget.draw = function() {};
+            // ALBABIT-FIX: Nodes 2.0 — set computedHeight=4 so Vue CSS height becomes 0px
+            widget.computedHeight = 4;
         }
     }
+    // ALBABIT-FIX: Always splice to trigger Vue reactive proxy re-evaluation of options.hidden,
+    // even when widget.type was never "hidden" (e.g. showing a widget on fresh node load)
+    if (node?.widgets) node.widgets.splice(0, 0);
 }
 
 function updateUILocks(node, presetName) {
@@ -351,7 +382,6 @@ app.registerExtension({
         if (nodeData.name !== "RadianceSamplerPro") return;
 
         const onNodeCreated = nodeType.prototype.onNodeCreated;
-        const onPropertyChanged = nodeType.prototype.onPropertyChanged;
 
         nodeType.prototype.onNodeCreated = function () {
             if (onNodeCreated) onNodeCreated.apply(this, arguments);
@@ -375,20 +405,24 @@ app.registerExtension({
             const toggleDynamicFields = () => {
                 if (multiCondWidget && weightBWidget) {
                     const isMulti = multiCondWidget.value !== "Off";
-                    setWidgetVisible(weightBWidget, isMulti);
+                    // ALBABIT-FIX: Pass node (this) for Nodes 2.0 Vue reactive widget hiding
+                    setWidgetVisible(weightBWidget, isMulti, this);
                 }
 
                 if (tileModeW) {
-                    const isTile = tileModeW.value === true || tileModeW.value === "true" || tileModeW.value === "True";
-                    setWidgetVisible(tileSizeW, isTile);
-                    setWidgetVisible(tileOverlapW, isTile);
-                    setWidgetVisible(tileBlendW, isTile);
+                    // ALBABIT-FIX: Include integer 1 — Nodes 2.0 may store toggle values as 0/1
+                    const isTile = tileModeW.value === true || tileModeW.value === 1 || tileModeW.value === "true" || tileModeW.value === "True";
+                    // ALBABIT-FIX: Pass node (this) for Nodes 2.0 Vue reactive widget hiding
+                    setWidgetVisible(tileSizeW, isTile, this);
+                    setWidgetVisible(tileOverlapW, isTile, this);
+                    setWidgetVisible(tileBlendW, isTile, this);
                 }
 
                 if (this.computeSize) {
                     const sz = this.computeSize();
-                    if (this.size[0] < sz[0]) this.size[0] = sz[0];
-                    if (this.size[1] < sz[1]) this.size[1] = sz[1];
+                    this.size[0] = Math.max(this.size[0], sz[0]);
+                    // ALBABIT-FIX: Use exact height (not Math.max) so node shrinks when widgets are hidden
+                    this.size[1] = sz[1];
                     app.graph.setDirtyCanvas(true, true);
                 }
             };
@@ -515,27 +549,6 @@ app.registerExtension({
                 }
             };
 
-            this.onPropertyChanged = function (property, value, prevValue) {
-                if (onPropertyChanged) onPropertyChanged.apply(this, arguments);
-
-                if (window.app && window.app.configuringGraph) return;
-
-                const pWidget = this.widgets?.find(wd => wd.name === "preset");
-                if (!pWidget || pWidget.value === "None (Custom)") return;
-                
-                const currentPreset = PRESET_CONFIGS[pWidget.value];
-                if (currentPreset && currentPreset[property] !== undefined) {
-                    if (currentPreset[property] != value) {
-                        console.log(`[Radiance Sampler] Manual override detected on '${property}'. Switching to Custom.`);
-                        pWidget.value = "None (Custom)";
-                        lastPresetValue = "None (Custom)";
-                        updateUILocks(this, "None (Custom)");
-                        updateDescription("None (Custom)");
-                        this.setDirtyCanvas(true);
-                    }
-                }
-            };
-
             setTimeout(() => {
                 const val = presetWidget.value;
                 if (val) {
@@ -544,19 +557,37 @@ app.registerExtension({
                     updateDescription(val);
                 }
                 toggleDynamicFields();
+                if (this.checkSigmaConnection) this.checkSigmaConnection();
             }, 100);
+
+            // Nodes 2.0: poll bypass/mute state at low frequency since onDrawBackground is not called
+            this._sigmaCheckInterval = setInterval(() => {
+                if (this.checkSigmaConnection) this.checkSigmaConnection();
+            }, 250);
         };
 
-        // ALBABIT-FIX: Use onDrawBackground instead of onConnectionsChange.
-        // This ensures the node constantly checks if the upstream node is bypassed (Ctrl+B) or muted (Ctrl+M)
+        // Classic mode: onDrawBackground polls every canvas frame for real-time bypass/mute detection
         const origOnDrawBackground = nodeType.prototype.onDrawBackground;
         nodeType.prototype.onDrawBackground = function (ctx) {
             if (origOnDrawBackground) origOnDrawBackground.apply(this, arguments);
-            
-            // Evaluates the Bypass/Mute state seamlessly in real-time
-            if (this.checkSigmaConnection) {
-                this.checkSigmaConnection();
+            if (this.checkSigmaConnection) this.checkSigmaConnection();
+        };
+
+        // Both modes: fires immediately when sigmas_override is wired or unwired
+        const origOnConnectionsChange = nodeType.prototype.onConnectionsChange;
+        nodeType.prototype.onConnectionsChange = function (type, slotIndex, isConnected, link, ioSlot) {
+            if (origOnConnectionsChange) origOnConnectionsChange.apply(this, arguments);
+            if (this.checkSigmaConnection) this.checkSigmaConnection();
+        };
+
+        // Cleanup interval when node is removed from graph
+        const origOnRemoved = nodeType.prototype.onRemoved;
+        nodeType.prototype.onRemoved = function () {
+            if (this._sigmaCheckInterval) {
+                clearInterval(this._sigmaCheckInterval);
+                this._sigmaCheckInterval = null;
             }
+            if (origOnRemoved) origOnRemoved.apply(this, arguments);
         };
     }
 });

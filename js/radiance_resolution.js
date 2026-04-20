@@ -21,29 +21,64 @@ import { app } from "../../../scripts/app.js";
  * ALBABIT-FIX: Greys out mp_aspect_ratio when mp_target is 0.
  */
 
-function setWidgetVisible(widget, visible) {
+// ALBABIT-FIX: Added node parameter to support Nodes 2.0 Vue reactive widget hiding.
+// Nodes 2.0 uses widget.options.hidden to filter widgets from Vue rendering
+// (confirmed in ComfyUI frontend source: t.filter(e=>!(e.options?.hidden||...)))
+function setWidgetVisible(widget, visible, node) {
     if (!widget) return;
+
+    // ALBABIT-FIX: Nodes 2.0 primary mechanism — options.hidden filters widget from Vue render list
+    if (!widget.options) widget.options = {};
+    widget.options.hidden = !visible;
+
+    // Classic LiteGraph canvas: widget.hidden drives getLayoutWidgets() exclusion
+    widget.hidden = !visible;
+
     if (visible) {
         if (widget.type === "hidden") {
             widget.type = widget._origType || "INT";
-            widget.computeSize = widget._origComputeSize || (() => [200, 20]);
+            // ALBABIT-FIX: Delete computeSize override so LiteGraph prototype recalculates correctly
+            // (fallback [200,20] gave wrong heights for toggles/combos without a custom computeSize)
+            if (widget._origComputeSize !== undefined) {
+                widget.computeSize = widget._origComputeSize;
+            } else {
+                delete widget.computeSize;
+            }
+            delete widget._origComputeSize;
+            // ALBABIT-FIX: Restore saved computedHeight for Nodes 2.0 Vue layout.
+            // If the widget was hidden before Vue's first layout pass (e.g. on node creation),
+            // _origComputedHeight will be undefined — fall back to 32 (standard widget row height).
+            if (widget._origComputedHeight !== undefined) {
+                widget.computedHeight = widget._origComputedHeight;
+                delete widget._origComputedHeight;
+            } else {
+                widget.computedHeight = 32;
+            }
         }
     } else {
         if (widget.type !== "hidden") {
             widget._origType = widget.type;
             widget._origComputeSize = widget.computeSize;
+            // ALBABIT-FIX: Save computedHeight so the show path can restore it exactly
+            widget._origComputedHeight = widget.computedHeight;
             widget.type = "hidden";
             widget.computeSize = () => [0, -4];
+            // ALBABIT-FIX: Nodes 2.0 — set computedHeight=4 so Vue CSS height becomes 0px (collapses widget)
+            widget.computedHeight = 4;
         }
     }
+    // ALBABIT-FIX: Always splice to trigger Vue reactive proxy re-evaluation of options.hidden,
+    // even when widget.type was never "hidden" (e.g. showing a widget on fresh node load)
+    if (node?.widgets) node.widgets.splice(0, 0);
 }
 
 function refreshNodeSize(node) {
     // Single deferred resize — avoids double-setTimeout pattern
     if (node.computeSize) {
         const sz = node.computeSize();
-        if (node.size[0] < sz[0]) node.size[0] = sz[0];
-        if (node.size[1] < sz[1]) node.size[1] = sz[1];
+        node.size[0] = Math.max(node.size[0], sz[0]);
+        // ALBABIT-FIX: Use exact height (not Math.max) so node shrinks when widgets are hidden
+        node.size[1] = sz[1];
         app.graph.setDirtyCanvas(true, true);
     }
 }
@@ -77,26 +112,27 @@ app.registerExtension({
                 const toggleFields = () => {
                     if (!enableVideoW) return;
 
-                    const isVideo = enableVideoW.value === true
-                        || enableVideoW.value === "true"
-                        || enableVideoW.value === "True";
+                    // ALBABIT-FIX: Include integer 1 — Nodes 2.0 may store toggle values as 0/1
+                    const isVideo = enableVideoW.value === true || enableVideoW.value === 1
+                        || enableVideoW.value === "true" || enableVideoW.value === "True";
 
                     // ALBABIT-FIX: Toggle between manual frames and auto seconds
                     const isAutoSec = frameModeW && (frameModeW.value === "Auto (Seconds)");
-                    
-                    setWidgetVisible(frameModeW, isVideo);
-                    setWidgetVisible(videoFramesW, isVideo && !isAutoSec);
-                    setWidgetVisible(durSecW, isVideo && isAutoSec);
-                    setWidgetVisible(frameRateW,   isVideo);
-                    setWidgetVisible(batchSizeW,   !isVideo);
-                    
+
+                    // ALBABIT-FIX: Pass node (this) for Nodes 2.0 Vue reactive widget hiding
+                    setWidgetVisible(frameModeW, isVideo, this);
+                    setWidgetVisible(videoFramesW, isVideo && !isAutoSec, this);
+                    setWidgetVisible(durSecW, isVideo && isAutoSec, this);
+                    setWidgetVisible(frameRateW,   isVideo, this);
+                    setWidgetVisible(batchSizeW,   !isVideo, this);
+
                     // ALBABIT-FIX: Show crop_to_broadcast_resolution only when video is enabled
-                    setWidgetVisible(cropBroadcastW, isVideo);
+                    setWidgetVisible(cropBroadcastW, isVideo, this);
 
                     // FEATURE: mp_aspect_ratio only visible when mp_target > 0
                     if (mpTargetW && mpAspectW) {
                         const mpActive = parseFloat(mpTargetW.value) > 0;
-                        setWidgetVisible(mpAspectW, mpActive);
+                        setWidgetVisible(mpAspectW, mpActive, this);
                         
                         // ALBABIT-FIX: Grey out the aspect ratio widget when inactive
                         mpAspectW.disabled = !mpActive;
@@ -197,10 +233,11 @@ app.registerExtension({
                     };
                 }
 
-                // Initial state — widgets exist here (no setTimeout needed)
-                toggleFields();
-                
-                // ALBABIT-FIX: Ensure default initialization and persistent visibility on tab switch
+                // ALBABIT-FIX: Defer initial toggleFields() so Vue completes its first layout pass
+                // before any widget is hidden. This mirrors the Sampler/IO pattern and ensures
+                // _origComputedHeight is set from a real Vue-computed value (not undefined).
+                // Immediate hide causes blank-space restore bug: Vue never layouts hidden widgets,
+                // so computedHeight is undefined when we try to restore them.
                 setTimeout(() => {
                     // Sync Preset Dimensions
                     if (presetW && presetW.value !== "Custom" && presetW.value !== "None (Custom)" && widthW && heightW) {
