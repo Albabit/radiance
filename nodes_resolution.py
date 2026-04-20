@@ -83,7 +83,7 @@ VIDEO_PRESET_CATEGORIES = {"WAN Video", "LTX Video", "HunyuanVideo"}
 # FEATURE: Latent format string matching nodes_sampler.py latent_format input
 LATENT_FORMAT_MAP = {
     "Auto (Flux 16ch / LTXV)": "auto", 
-    "LTXV (128ch)": "ltxv",
+    "LTXV": "ltxv",
     "Flux / SD3 (16ch)": "flux",
     "SDXL / SD 1.5 (4ch)": "sdxl",
 }
@@ -94,14 +94,14 @@ MP_ASPECT_RATIOS = [
     "2.39:1", "1.85:1", "9:16", "2:3", "3:4",
 ]
 
-MODEL_TYPES = ["Auto (Flux 16ch / LTXV)", "LTXV (128ch)", "Flux / SD3 (16ch)", "SDXL / SD 1.5 (4ch)"]
+MODEL_TYPES = ["Auto (Flux 16ch / LTXV)", "LTXV", "Flux / SD3 (16ch)", "SDXL / SD 1.5 (4ch)"]
 
 ORIENTATIONS = ["As Preset", "Landscape", "Portrait", "Square"]
 
 # Latent channels per model type
 LATENT_CHANNELS = {
     "Auto (Flux 16ch / LTXV)": 16,
-    "LTXV (128ch)": 128,
+    "LTXV": 128,
     "Flux / SD3 (16ch)": 16,
     "SDXL / SD 1.5 (4ch)": 4,
 }

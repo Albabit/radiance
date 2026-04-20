@@ -183,7 +183,7 @@ app.registerExtension({
 
                             if (modelTypeW) {
                                 if (presetW.value.includes("LTX")) {
-                                    modelTypeW.value = "LTXV (128ch)";
+                                    modelTypeW.value = "LTXV";
                                     if (latentChannelsW) latentChannelsW.value = 128;
                                 } else if (presetW.value.includes("SDXL") || presetW.value.includes("SD 1.5")) {
                                     modelTypeW.value = "SDXL / SD 1.5 (4ch)";

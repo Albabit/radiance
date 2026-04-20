@@ -176,11 +176,11 @@ _ARCH_HEURISTICS = [
     # architecture and NOT present in Wan, SD3, Flux, or PixArt models.
     # v3.1: Primary key is `patchify_proj`; fallback checks for `patch_embedding`
     # + `adaln_single` + NO `time_embedding` (excludes Wan).
-    (lambda ks: any("patchify_proj" in k for k in ks),             "ltx"),
+    (lambda ks: any("patchify_proj" in k for k in ks),             "ltxv"),
     # LTX fallback: older LTXV checkpoints that use patch_embedding naming
     (lambda ks: any("patch_embedding" in k for k in ks)
               and any("adaln_single" in k for k in ks)
-              and not any("time_embedding" in k for k in ks),       "ltx"),
+              and not any("time_embedding" in k for k in ks),       "ltxv"),
 
     # PixArt: adaln_single WITHOUT patchify_proj (LTX also has adaln_single)
     # v3.1 FIX: Added exclusion of `patchify_proj` to prevent PixArt matching LTX
@@ -242,8 +242,8 @@ LATENT_CHANNELS = {
     "flux":           16,
     "sd3":            16,
     "sd3.5":          16,
-    "ltx":            128, # ALBABIT-FIX: LTX-Video (all versions) video latent = 128ch
-    "ltxav":          128, # ALBABIT-FIX: LTX-Video 2.3 AV — video latent = 128ch (fp8 included)
+    "ltxv":           128,
+    "ltxav":          128,
     "hunyuan_video":  16,
     "wan":            16,
     "lumina2":        16,
@@ -272,8 +272,8 @@ def _latent_format(arch: str) -> str:
         "flux":           "flux_16ch",
         "sd3":            "sd3_16ch",
         "sd3.5":          "sd3_16ch",
-        "ltx":            "ltx_128ch",   # ALBABIT-FIX: LTX-Video video latent = 128ch
-        "ltxav":          "ltxav_128ch", # ALBABIT-FIX: LTX-Video 2.3 AV video latent = 128ch
+        "ltxv":           "ltxv",
+        "ltxav":          "ltxav",
         "hunyuan_video":  "hunyuan_16ch",
         "wan":            "wan_16ch",
         "lumina2":        "lumina_16ch",
@@ -301,8 +301,8 @@ CLIP_SLOT_ORDER = {
     "sd1.5":          ["clip_l"],
     "hunyuan_video":  ["llm_encoder", "clip_l"],
     "wan":            ["t5xxl"],
-    "ltx":            ["llm_encoder", "text_projection"], # ALBABIT-FIX: Reassigned from t5xxl to llm_encoder
-    "ltxav":          ["llm_encoder", "text_projection"], # ALBABIT-FIX: Added specific type
+    "ltxv":           ["llm_encoder", "text_projection"],
+    "ltxav":          ["llm_encoder", "text_projection"],
     "lumina2":        ["t5xxl"],
     "z_image":        ["t5xxl"],
     "pixart":         ["t5xxl"],
@@ -437,7 +437,7 @@ CHECKPOINT_PRESETS = {
         "vram_gb":       16,
     },
     "→ LTX Video": {
-        "model_type":    "ltx",
+        "model_type":    "ltxv",
         "weight_dtype":  "fp16",
         "clip_dtype":    "fp16",
         "offload_mode":  "none",
@@ -445,7 +445,7 @@ CHECKPOINT_PRESETS = {
         "vram_gb":       12,
     },
     "→ LTX Video 13B": {
-        "model_type":    "ltx",
+        "model_type":    "ltxv",
         "weight_dtype":  "fp8_e4m3fn",
         "clip_dtype":    "fp16",
         "offload_mode":  "none",
@@ -526,7 +526,7 @@ def estimate_vram_usage(
     base_vram = {
         "flux": 12.0, "sd3": 10.0, "sd3.5": 12.0,
         "sdxl": 6.5, "sd1.5": 3.5,
-        "hunyuan_video": 20.0, "wan": 14.0, "ltx": 11.0, "ltxav": 15.0, # ALBABIT-FIX
+        "hunyuan_video": 20.0, "wan": 14.0, "ltxv": 11.0, "ltxav": 15.0,
         "pixart": 6.0, "aura_flow": 8.0, "kolors": 8.0,
         "lumina2": 12.0, "z_image": 14.0,
     }.get(model_type, 8.0)
@@ -539,7 +539,7 @@ def estimate_vram_usage(
     clip_vram = {
         "flux": 4.5, "sd3": 3.0, "sd3.5": 3.5,
         "sdxl": 1.5, "sd1.5": 0.8,
-        "hunyuan_video": 4.5, "wan": 3.0, "ltx": 2.5, "ltxav": 8.0, # ALBABIT-FIX
+        "hunyuan_video": 4.5, "wan": 3.0, "ltxv": 2.5, "ltxav": 8.0,
         "pixart": 2.0, "aura_flow": 2.0, "kolors": 3.0,
         "lumina2": 3.0, "z_image": 3.0,
     }.get(model_type, 2.0)
@@ -599,16 +599,16 @@ def get_clip_type_enum(model_type: str):
 
     # v3.1: Extended variant list per model — handles cases where the ComfyUI
     # CLIPType enum name doesn't match a simple uppercase of the model_type.
-    # E.g. model_type "ltx" → CLIPType.LTX_VIDEO (not CLIPType.LTX)
+    # E.g. model_type "ltxv" → CLIPType.LTX_VIDEO (not CLIPType.LTXV)
     _EXTRA_VARIANTS = {
-        "ltx":            ["LTX_VIDEO", "LTXV", "LTX"],
-        "ltxav":          ["LTX_VIDEO", "LTXV", "LTX"], # ALBABIT-FIX
+        "ltxv":           ["LTX_VIDEO", "LTXV", "LTX"],
+        "ltxav":          ["LTX_VIDEO", "LTXV", "LTX"],
         "hunyuan_video":  ["HUNYUAN_VIDEO", "HUNYUANVIDEO"],
         "wan":            ["WAN", "WAN2", "WAN_VIDEO"],
         "aura_flow":      ["AURA_FLOW", "AURAFLOW"],
     }
 
-    for name in ("hunyuan_video", "wan", "ltx", "ltxav", "pixart", "aura_flow", "kolors", "lumina2", "z_image"): # ALBABIT-FIX: ltxav
+    for name in ("hunyuan_video", "wan", "ltxv", "ltxav", "pixart", "aura_flow", "kolors", "lumina2", "z_image"):
         # Build variant list: explicit extras first, then the auto-generated names
         enum_name = name.upper().replace(".", "_")
         auto_variants = [enum_name, name.upper(), name.title().replace("_", "")]
@@ -788,7 +788,7 @@ MODEL_TYPES = [
     "Auto-Detect",
     "flux", "sd3", "sd3.5",
     "sdxl", "sd1.5",
-    "hunyuan_video", "wan", "ltx", "ltxav",
+    "hunyuan_video", "wan", "ltxv", "ltxav",
     "lumina2", "z_image",
     "pixart", "aura_flow", "kolors",
 ]
@@ -1238,7 +1238,7 @@ class RadianceUnifiedLoader:
         clip_paths = _assemble_clip_paths(resolved_type, clip_l, clip_g, t5xxl, llm_encoder, text_projection)
 
         # Allow missing paths ONLY IF we are injecting the UNET natively as a dualclip projection source
-        is_gemma_ltx = (resolved_type in ("ltx", "ltxav") and llm_encoder and llm_encoder != "None" and "gemma" in llm_encoder.lower())
+        is_gemma_ltx = (resolved_type in ("ltxv", "ltxav") and llm_encoder and llm_encoder != "None" and "gemma" in llm_encoder.lower())
 
         if not clip_paths and not is_gemma_ltx:
             raise ValueError(
