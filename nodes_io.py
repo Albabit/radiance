@@ -9,6 +9,13 @@ import subprocess  # nosec B404
 import tempfile
 from typing import Dict, Any, Optional, List, Tuple
 
+# Enable cv2's EXR codec before first use. The codec is initialised lazily
+# (on first EXR read/write attempt, not at import time), so this is effective
+# even if cv2 was already imported by ComfyUI. Without this flag, cv2 prints
+# a per-frame "OpenEXR codec is disabled" warning to stderr whenever
+# write_exr_robust() triggers cv2's codec scan as part of its internal flow.
+os.environ.setdefault("OPENCV_IO_ENABLE_OPENEXR", "1")
+
 import torch
 import numpy as np
 import cv2
@@ -22,13 +29,22 @@ except ImportError:
 import folder_paths
 
 try:
-    from .hdr.io import write_exr_robust, write_hdr_rgbe, write_exr_multipart
+    from .hdr.io import write_exr_robust, write_hdr_rgbe
 except ImportError:
     try:
-        from hdr.io import write_exr_robust, write_hdr_rgbe, write_exr_multipart
+        from hdr.io import write_exr_robust, write_hdr_rgbe
     except ImportError:
         write_exr_robust = None
         write_hdr_rgbe = None
+
+# write_exr_multipart is a newer addition — import separately so a missing
+# symbol does not poison the write_exr_robust / write_hdr_rgbe imports above.
+try:
+    from .hdr.io import write_exr_multipart
+except ImportError:
+    try:
+        from hdr.io import write_exr_multipart
+    except ImportError:
         write_exr_multipart = None
 
 
