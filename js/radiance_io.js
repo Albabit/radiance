@@ -33,23 +33,29 @@ const FORMAT_GROUPS = {
 		"Video — MOV (ProRes 4444)",
 		"Video — MOV (ProRes 4444 XQ)",
 		"Video — MOV (ProRes 4444 HDR Log)",
+		"Video — MOV (DNxHR HQ)",
+		"Video — MOV (DNxHR 444)",
 	],
 	"Sequence": [
 		"Image Sequence — EXR (32-bit)",
 		"Image Sequence — Radiance HDR (.hdr)",
 		"Image Sequence — PNG (16-bit)",
 		"Image Sequence — PNG (8-bit)",
+		"Image Sequence — TIFF (32-bit Float)",
+		"Image Sequence — TIFF (16-bit)",
 		"Image Sequence — JPEG",
 		"GIF — Animated",
 		"WEBP — Animated",
 	],
-	// ALBABIT-FIX: Single Image mode uses shorter labels — "Image Sequence —" prefix removed
-	// since there is no sequence. Values match the WRITE_FORMATS single-image entries in nodes_io.py.
+	// Single Image mode uses shorter labels — "Image Sequence —" prefix removed.
+	// Values match the WRITE_FORMATS single-image entries in nodes_io.py.
 	"Single Image": [
 		"EXR (32-bit)",
 		"Radiance HDR (.hdr)",
 		"PNG (16-bit)",
 		"PNG (8-bit)",
+		"TIFF (32-bit Float)",
+		"TIFF (16-bit)",
 		"JPEG",
 		"GIF",
 		"WEBP",
