@@ -360,7 +360,10 @@ class RadianceDigitalCinemaRead:
                         "Ignored in other modes."
                     ),
                 }),
-                "input_colorspace": (INPUT_COLORSPACES, {"default": "sRGB (Standard)"}),
+                # ALBABIT-FIX: Default changed from "sRGB (Standard)" to "Linear (sRGB)".
+                # Radiance nodes target linear HDR workflows (EXR sequences);
+                # "Linear (sRGB)" is the correct default for the majority of use cases.
+                "input_colorspace": (INPUT_COLORSPACES, {"default": "Linear (sRGB)"}),
                 "fps_override": ("FLOAT", {"default": 0.0, "min": 0.0,
                     "tooltip": "Override detected FPS. 0 = auto-detect (video) or 24.0 (sequence)."}),
             },
@@ -449,11 +452,63 @@ class RadianceDigitalCinemaRead:
             is_video    = True
             is_sequence = False
         elif read_mode == "Single Frame":
-            is_video    = True
+            is_video    = False
             is_sequence = False
         else:  # "Sequence"
             is_video    = False
             is_sequence = True
+
+        # ══════════════════════════════════════════════════════════════════════
+        # SINGLE FRAME PATH (image file — EXR, HDR, PNG, JPG, etc.)
+        # ══════════════════════════════════════════════════════════════════════
+        if read_mode == "Single Frame":
+            ext = os.path.splitext(source_path)[1].lower()
+            img     = None
+            mask_np = None
+
+            if ext in (".exr", ".hdr"):
+                try:
+                    rgb_np, alpha_np, _ = self._load_single_exr(source_path)
+                    if rgb_np is None:
+                        raise IOError(
+                            f"[Cinema Read] Cannot load EXR '{source_path}'. "
+                            f"Install OpenEXR (pip install OpenEXR) or imageio for EXR support."
+                        )
+                    img     = rgb_np
+                    mask_np = alpha_np if alpha_np is not None else np.ones(img.shape[:2], dtype=np.float32)
+                except IOError:
+                    raise
+                except Exception as e:
+                    raise IOError(f"[Cinema Read] EXR/HDR load failed for '{source_path}': {e}") from e
+            else:
+                raw = cv2.imread(source_path, cv2.IMREAD_UNCHANGED)
+                if raw is None:
+                    raise IOError(f"[Cinema Read] Cannot open '{source_path}'.")
+                if raw.ndim == 2:
+                    img     = np.stack([raw, raw, raw], axis=-1);  del raw
+                    mask_np = np.ones(img.shape[:2], dtype=np.float32)
+                elif raw.shape[-1] == 4:
+                    mask_np = raw[..., 3].astype(np.float32) / (255.0 if raw.dtype == np.uint8 else 65535.0)
+                    img     = cv2.cvtColor(raw, cv2.COLOR_BGRA2RGB);  del raw
+                else:
+                    img     = cv2.cvtColor(raw, cv2.COLOR_BGR2RGB);  del raw
+                    mask_np = np.ones(img.shape[:2], dtype=np.float32)
+
+            if img.dtype == np.uint8:
+                img = img.astype(np.float32) / 255.0
+            elif img.dtype == np.uint16:
+                img = img.astype(np.float32) / 65535.0
+            else:
+                img = img.astype(np.float32)
+
+            height, width = img.shape[:2]
+            fps    = fps_override if fps_override > 0 else 24.0
+            frame_t = torch.from_numpy(img[:, :, :3].copy()).unsqueeze(0)
+            del img
+            images = apply_input_transform(frame_t, input_colorspace)
+            mask   = torch.from_numpy(mask_np).unsqueeze(0)
+            logger.info(f"[Cinema Read] Single Frame from '{os.path.basename(source_path)}' ({width}×{height})")
+            return (images, mask, 1, width, height, float(fps), None, source_path)
 
         # ══════════════════════════════════════════════════════════════════════
         # VIDEO PATH
@@ -473,25 +528,6 @@ class RadianceDigitalCinemaRead:
             if detected_fps < 1.0 or detected_fps > 1000.0:
                 detected_fps = 24.0
             fps = fps_override if fps_override > 0 else detected_fps
-
-            # ── Single Frame ──────────────────────────────────────────────────
-            if read_mode == "Single Frame":
-                seek_idx = max(0, min(frame_number - 1, total_frames - 1))
-                cap.set(cv2.CAP_PROP_POS_FRAMES, seek_idx)
-                ret, frame = cap.read()
-                cap.release()
-                if not ret:
-                    raise IOError(
-                        f"[Cinema Read] Could not decode frame {frame_number} "
-                        f"from '{source_path}' (total={total_frames})."
-                    )
-                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                frames_np = frame_rgb[np.newaxis].astype(np.float32) / 255.0
-                images    = apply_input_transform(torch.from_numpy(frames_np.copy()), input_colorspace)
-                mask      = torch.ones((1, height, width), dtype=torch.float32)
-                logger.info(f"[Cinema Read] Single Frame #{frame_number} from "
-                            f"'{os.path.basename(source_path)}' ({width}×{height})")
-                return (images, mask, 1, width, height, float(fps), None, source_path)
 
             # ── Full video range ──────────────────────────────────────────────
             cv2_start      = max(0, start_frame - 1)

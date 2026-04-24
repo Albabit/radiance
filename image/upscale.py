@@ -25,6 +25,24 @@ logger = logging.getLogger("radiance.image.upscale")
 _MODEL_CACHE = {}
 _CACHE_LOCK = threading.RLock()
 
+# ALBABIT-FIX: SUPIR models are diffusion-based (not feedforward upscalers) and
+# cannot be identified or loaded by Spandrel. They require their own loading path.
+_SUPIR_MODELS = {"SUPIR-v0F_fp16", "SUPIR-v0Q_fp16"}
+
+
+def _find_supir_dir() -> str:
+    """Return the ComfyUI-SUPIR custom-node directory, or None if not installed."""
+    # upscale.py lives at:  .../ComfyUI/custom_nodes/radiance/image/upscale.py
+    # ComfyUI-SUPIR lives at: .../ComfyUI/custom_nodes/ComfyUI-SUPIR/
+    custom_nodes = os.path.dirname(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    )
+    for name in ("ComfyUI-SUPIR", "comfyui-supir", "ComfyUI_SUPIR"):
+        d = os.path.join(custom_nodes, name)
+        if os.path.isdir(d) and os.path.exists(os.path.join(d, "nodes.py")):
+            return d
+    return None
+
 
 # =============================================================================
 # TRUE 32-BIT GAUSSIAN BLUR (replaces PIL 8-bit roundtrip)
@@ -1672,6 +1690,30 @@ class RadianceAIUpscale:
                         "tooltip": "Unload model from VRAM after processing to free memory.",
                     },
                 ),
+                "supir_steps": (
+                    "INT",
+                    {
+                        "default": 45,
+                        "min": 1,
+                        "max": 200,
+                        "step": 1,
+                        "tooltip": "SUPIR only: number of diffusion sampling steps. "
+                                   "Higher = better quality but slower. Ignored for all other models.",
+                    },
+                ),
+                "sdxl_model_name": ("STRING", {
+                    "default": "",
+                    "tooltip": "SUPIR only: filename of your SDXL base checkpoint "
+                               "(e.g. sd_xl_base_1.0_0.9vae.safetensors). "
+                               "Leave empty to auto-detect from the checkpoints folder. "
+                               "Ignored for all non-SUPIR models.",
+                }),
+                "supir_prompt": ("STRING", {
+                    "default": "",
+                    "multiline": True,
+                    "tooltip": "SUPIR only: text description for SUPIR upscaling. "
+                               "Leave empty for default conditioning. Ignored for all other models.",
+                }),
             },
         }
 
@@ -1727,7 +1769,215 @@ class RadianceAIUpscale:
                 pass
             return False
 
-    def _load_model(self, model_name: str):
+    # ──────────────────────────────────────────────────────────────────────────
+    # SUPIR-specific loading and inference.
+    # SUPIR (v0Q / v0F) is a latent-diffusion upscaler — Spandrel raises
+    # UnsupportedModelError for it. These methods delegate to the
+    # ComfyUI-SUPIR extension (kijai/ComfyUI-SUPIR) when installed.
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def _load_supir_model(self, model_name: str, model_path: str, sdxl_model_name: str = ""):
+        """Load a SUPIR model via the ComfyUI-SUPIR extension bridge.
+
+        ALBABIT-FIX: Complete rewrite. Debug log revealed three things:
+          1. nodes.NODE_CLASS_MAPPINGS DOES contain SUPIR classes — we were looking for
+             the wrong key ('SUPIRModelLoader' instead of 'SUPIR_model_loader').
+          2. ComfyUI-SUPIR's loader also requires an SDXL base model filename
+             (sdxl_model param). A new sdxl_model_name input is now forwarded here.
+          3. The loader returns (SUPIRMODEL, SUPIRVAE) — both must be stored in the
+             cache tuple for use by _run_supir.
+        """
+        import sys
+
+        # ALBABIT-FIX: Use nodes.NODE_CLASS_MAPPINGS with the correct key names for this
+        # version of ComfyUI-SUPIR. The old code used 'SUPIRModelLoader' which does not
+        # exist — the real key is 'SUPIR_model_loader'.
+        loader_cls = None
+        _ncm = {}
+
+        try:
+            import nodes as _comfy_nodes
+            _ncm = getattr(_comfy_nodes, "NODE_CLASS_MAPPINGS", {})
+            loader_cls = _ncm.get("SUPIR_model_loader")
+        except (ImportError, AttributeError):
+            pass
+
+        # Fallback: ComfyUI 0.19.x stores the module under its full directory path
+        if loader_cls is None:
+            supir_dir = _find_supir_dir()
+            if supir_dir:
+                _mod = sys.modules.get(supir_dir)
+                if _mod is not None:
+                    _ncm_try = _mod.__dict__.get("NODE_CLASS_MAPPINGS", {})
+                    if isinstance(_ncm_try, dict) and "SUPIR_model_loader" in _ncm_try:
+                        loader_cls = _ncm_try["SUPIR_model_loader"]
+                        _ncm = _ncm_try
+
+        if loader_cls is None:
+            supir_dir = _find_supir_dir()
+            if supir_dir is None:
+                return None, (
+                    "SUPIR is a diffusion-based upscaler — Spandrel cannot load it. "
+                    "To enable SUPIR in this node:\n"
+                    "  1. Install ComfyUI-SUPIR via ComfyUI Manager (search 'SUPIR' by kijai).\n"
+                    "  2. Restart ComfyUI so it loads the extension.\n"
+                    "  3. Set 'sdxl_model_name' to your SDXL base model filename "
+                    "(e.g. sd_xl_base_1.0_0.9vae.safetensors)."
+                )
+            return None, (
+                "ComfyUI-SUPIR is installed but SUPIR_model_loader was not found in "
+                "NODE_CLASS_MAPPINGS. Check the ComfyUI startup log for errors in "
+                "comfyui-supir, then restart ComfyUI."
+            )
+
+        # Build the class map with actual names from this version of ComfyUI-SUPIR
+        supir_cls_map = {
+            "SUPIR_model_loader": loader_cls,
+            "SUPIR_encode":       _ncm.get("SUPIR_encode"),
+            "SUPIR_conditioner":  _ncm.get("SUPIR_conditioner"),
+            "SUPIR_sample":       _ncm.get("SUPIR_sample"),
+            "SUPIR_decode":       _ncm.get("SUPIR_decode"),
+        }
+
+        # Auto-detect SDXL model if not specified
+        if not sdxl_model_name:
+            import folder_paths as _fp
+            _ckpts = _fp.get_filename_list("checkpoints")
+            for _c in _ckpts:
+                if "xl" in _c.lower() and "base" in _c.lower():
+                    sdxl_model_name = _c
+                    break
+            if not sdxl_model_name:
+                for _c in _ckpts:
+                    if "xl" in _c.lower():
+                        sdxl_model_name = _c
+                        break
+            if not sdxl_model_name:
+                return None, (
+                    "SUPIR requires an SDXL base model. Set 'sdxl_model_name' to the "
+                    "filename of your SDXL checkpoint (e.g. sd_xl_base_1.0_0.9vae.safetensors) "
+                    "or place an SDXL model in your checkpoints folder."
+                )
+            logger.info(f"[RadianceAIUpscale] SUPIR: auto-detected SDXL model '{sdxl_model_name}'")
+
+        try:
+            import folder_paths as fp
+            loader = loader_cls()
+            model_filename = os.path.basename(model_path)
+            model_dir      = os.path.dirname(model_path)
+
+            # SUPIR_model_loader looks up both models in "checkpoints" via folder_paths.
+            # Temporarily register the SUPIR model's directory there if it is not already.
+            _tmp_buckets = []
+            for bucket in ("upscale_models", "checkpoints"):
+                if model_dir not in fp.get_folder_paths(bucket):
+                    fp.add_model_folder_path(bucket, model_dir)
+                    _tmp_buckets.append(bucket)
+
+            try:
+                result = loader.process(
+                    supir_model=model_filename,
+                    sdxl_model=sdxl_model_name,
+                    diffusion_dtype="auto",
+                    fp8_unet=False,
+                )
+            finally:
+                for bucket in _tmp_buckets:
+                    try:
+                        fp.folder_names_and_paths[bucket][0].remove(model_dir)
+                    except (ValueError, KeyError):
+                        pass
+
+            if not result or result[0] is None:
+                return None, "SUPIR_model_loader returned an empty result — check ComfyUI-SUPIR logs."
+
+            # result = (SUPIRMODEL, SUPIRVAE)
+            supir_model_obj = result[0]
+            supir_vae_obj   = result[1]
+            entry = ("supir", supir_model_obj, supir_vae_obj, supir_cls_map)
+            _MODEL_CACHE[model_name] = entry
+            logger.info(f"[RadianceAIUpscale] SUPIR loaded: {model_name} + {sdxl_model_name}")
+            return entry, f"SUPIR loaded: {model_name} + {sdxl_model_name}"
+
+        except Exception as e:
+            import traceback as _tb
+            logger.error(f"[RadianceAIUpscale] SUPIR load failed: {e}\n" + _tb.format_exc())
+            return None, f"SUPIR load failed: {e}"
+
+    def _run_supir(self, model_tuple, image, tile_size, tile_overlap, prompt="", steps=45):
+        """Run SUPIR inference using ComfyUI-SUPIR node classes as a backend."""
+        import inspect
+
+        _, supir_model, supir_vae, supir_cls_map = model_tuple
+
+        def _call(cls_name, method_name, **kwargs):
+            cls = supir_cls_map.get(cls_name)
+            if cls is None:
+                raise RuntimeError(f"{cls_name} not found in ComfyUI-SUPIR node registry — update ComfyUI-SUPIR.")
+            obj    = cls()
+            method = getattr(obj, method_name, None)
+            if method is None:
+                raise RuntimeError(f"{cls_name}.{method_name}() not found")
+            sig    = inspect.signature(method)
+            # Forward only kwargs the method accepts; skip None values.
+            filtered = {k: v for k, v in kwargs.items() if k in sig.parameters and v is not None}
+            return method(**filtered)
+
+        # ── Step 1 : encode LQ frames to SUPIR latent space ──────────────────
+        # SUPIR_encode processes the batch internally frame-by-frame.
+        encode_result = _call("SUPIR_encode", "encode",
+            SUPIR_VAE=supir_vae,
+            image=image,
+            use_tiled_vae=True,
+            encoder_tile_size=tile_size,
+            encoder_dtype="auto",
+        )
+        latents = encode_result[0]  # {"samples": tensor, "original_size": [H, W]}
+
+        # ── Step 2 : build positive/negative conditioning ─────────────────────
+        cond_result = _call("SUPIR_conditioner", "condition",
+            SUPIR_model=supir_model,
+            latents=latents,
+            positive_prompt=prompt or "high quality, detailed",
+            negative_prompt="blurry, low quality, noise, artifacts, compression",
+        )
+        positive = cond_result[0]
+        negative = cond_result[1]
+
+        # ── Step 3 : diffusion sampling ───────────────────────────────────────
+        sample_result = _call("SUPIR_sample", "sample",
+            SUPIR_model=supir_model,
+            latents=latents,
+            positive=positive,
+            negative=negative,
+            seed=42,
+            steps=steps,
+            cfg_scale_start=4.0,
+            cfg_scale_end=4.0,
+            EDM_s_churn=5,
+            s_noise=1.003,
+            DPMPP_eta=1.0,
+            control_scale_start=1.0,
+            control_scale_end=1.0,
+            restore_cfg=-1.0,
+            keep_model_loaded=False,
+            sampler="RestoreEDMSampler",
+        )
+        output_latents = sample_result[0]
+
+        # ── Step 4 : decode latents back to pixel space ───────────────────────
+        decode_result = _call("SUPIR_decode", "decode",
+            SUPIR_VAE=supir_vae,
+            latents=output_latents,
+            use_tiled_vae=True,
+            decoder_tile_size=tile_size,
+        )
+        out_img = decode_result[0]  # (B, H, W, C) float32, already cpu
+
+        info = f"SUPIR upscale: {image.shape[0]} frame(s) via ComfyUI-SUPIR"
+        return out_img, info
+
+    def _load_model(self, model_name: str, sdxl_model_name: str = ""):
         """Load an upscale model with caching."""
         with _CACHE_LOCK:
             # Check cache first
@@ -1763,11 +2013,16 @@ class RadianceAIUpscale:
                         f"Model {model_name} not found. Place in models/upscale_models/",
                     )
 
-            # Load the model
+            # ALBABIT-FIX: SUPIR models are diffusion-based and cannot be identified by
+            # Spandrel (which only handles feedforward upscalers). Route them to a
+            # dedicated loader that uses the ComfyUI-SUPIR extension when available.
+            if model_name in _SUPIR_MODELS:
+                return self._load_supir_model(model_name, model_path, sdxl_model_name)
+
+            # Load standard upscale models with Spandrel
             try:
                 sd = comfy.utils.load_torch_file(model_path, safe_load=True)
 
-                # Load with spandrel
                 try:
                     import spandrel
                 except ImportError:
@@ -1787,8 +2042,18 @@ class RadianceAIUpscale:
                     return upscale_model, f"Loaded: {model_name}"
 
                 except Exception as e:
-                    logger.error(f"Spandrel load failed for {model_name}: {e}")
-                    return None, f"Model load error: {str(e)}"
+                    # ALBABIT-FIX: Spandrel raises UnsupportedModelError with no message
+                    # when it cannot identify the architecture (str(e) == ""). Replace the
+                    # silent empty string with a human-readable diagnostic.
+                    err_msg = str(e)
+                    if not err_msg:
+                        err_msg = (
+                            "Architecture not recognised by Spandrel (UnsupportedModelError). "
+                            "Ensure the model is a supported ESRGAN / SwinIR / HAT variant "
+                            "and that your ComfyUI Spandrel version is up to date."
+                        )
+                    logger.error(f"Spandrel load failed for {model_name}: {err_msg}")
+                    return None, f"Model load error: {err_msg}"
 
             except Exception as e:
                 # v1.1.0 FIX: Removed destructive auto-deletion of "small" model files.
@@ -1835,36 +2100,39 @@ class RadianceAIUpscale:
 
         new_h, new_w = h * scale, w * scale
 
-        # ── Memory safety cap: 64 MP = 16K×4K ──────────────────────────────
+        # ── Memory safety cap: 64 MP per frame ──────────────────────────────
         MAX_OUTPUT_PIXELS = 64_000_000  # 64 megapixels (~16K×4K)
         output_pixels = new_h * new_w
         if output_pixels > MAX_OUTPUT_PIXELS:
-            # Scale down to fit within the cap
             cap_factor = (MAX_OUTPUT_PIXELS / (h * w)) ** 0.5
             safe_scale = max(1, int(cap_factor))
             new_h, new_w = h * safe_scale, w * safe_scale
             logger.warning(
                 f"[RadianceAIUpscale] Fallback x{scale} would produce {output_pixels:,} pixels "
-                f"({new_h // safe_scale * scale}×{new_w // safe_scale * scale}), "
-                f"which would require ~{output_pixels * 4 * c // 1024**3:.1f} GB RAM. "
-                f"Capping to x{safe_scale} ({new_h}×{new_w}) to avoid OOM."
+                f"per frame. Capping to x{safe_scale} ({new_h}×{new_w}) to avoid OOM."
             )
             scale = safe_scale
 
-        # ── Estimate memory before allocating ────────────────────────────────
-        approx_bytes = b * new_h * new_w * c * 4  # float32
-        if approx_bytes > 4 * 1024 ** 3:  # warn if > 4 GB
+        # ALBABIT-FIX: memory warning and interpolation are now per-frame.
+        # Previous code called F.interpolate on the full batch tensor (all B frames at
+        # once), which for a 121-frame video at 4× resulted in a ~45 GB allocation and
+        # a misleading console warning that included the batch dimension in the estimate.
+        approx_bytes_per_frame = new_h * new_w * c * 4  # float32, single frame
+        if approx_bytes_per_frame * b > 4 * 1024 ** 3:
             logger.warning(
-                f"[RadianceAIUpscale] Fallback upscale output will be "
-                f"~{approx_bytes / 1024**3:.1f} GB. Consider using a smaller image."
+                f"[RadianceAIUpscale] Fallback upscale: {b} frame(s) × "
+                f"~{approx_bytes_per_frame / 1024**2:.0f} MB each "
+                f"= ~{approx_bytes_per_frame * b / 1024**3:.1f} GB total. "
+                f"Consider using a smaller image or fewer frames."
             )
 
-        img_bchw = image.float().cpu().permute(0, 3, 1, 2)
-        upscaled = F.interpolate(
-            img_bchw, size=(new_h, new_w), mode="bicubic", align_corners=False
-        )
-        result = upscaled.permute(0, 2, 3, 1)
+        results = []
+        for b_idx in range(b):
+            frame = image[b_idx : b_idx + 1].float().cpu().permute(0, 3, 1, 2)
+            up = F.interpolate(frame, size=(new_h, new_w), mode="bicubic", align_corners=False)
+            results.append(up.permute(0, 2, 3, 1)[0])
 
+        result = torch.stack(results)
         return (result, f"Bicubic {scale}x (AI model not available)")
 
     def _hdr_compress(self, img: torch.Tensor, mode: str) -> Tuple[torch.Tensor, Dict]:
@@ -1922,17 +2190,44 @@ class RadianceAIUpscale:
         tile_overlap: int = 32,
         auto_download: bool = True,
         unload_model: bool = False,
+        supir_steps: int = 45,
+        sdxl_model_name: str = "",
+        supir_prompt: str = "",
     ):
         """Upscale image using AI model with tiled processing."""
 
         # Load model if needed
         if self.model is None or self.current_model_name != model_name:
-            self.model, load_info = self._load_model(model_name)
+            # ALBABIT-FIX: forward sdxl_model_name to _load_supir_model via _load_model routing
+            self.model, load_info = self._load_model(model_name, sdxl_model_name=sdxl_model_name)
             self.current_model_name = model_name
 
             if self.model is None:
                 logger.warning(f"{load_info}")
                 return self._fallback_upscale(image, model_name)
+
+        # ALBABIT-FIX: Route SUPIR models to the dedicated diffusion inference path.
+        # _load_supir_model caches the result as a ("supir", model, nodes_module) tuple.
+        if isinstance(self.model, tuple) and self.model[0] == "supir":
+            try:
+                result_images, info = self._run_supir(
+                    self.model, image, tile_size, tile_overlap, supir_prompt, supir_steps
+                )
+            except Exception as e:
+                import traceback as _tb
+                logger.error(
+                    f"[RadianceAIUpscale] SUPIR inference failed: {e}\n" + _tb.format_exc()
+                )
+                return self._fallback_upscale(image, model_name)
+
+            if unload_model:
+                self.model = None
+                self.current_model_name = None
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                info += " (model unloaded)"
+
+            return (result_images, info)
 
         try:
             from comfy import model_management

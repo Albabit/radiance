@@ -136,12 +136,28 @@ function setWidgetVisible(widget, visible, node) {
 function refreshNodeSize(node) {
 	if (node.computeSize) {
 		const sz = node.computeSize();
-		// ALBABIT-FIX: Force exact height (grow AND shrink) so the node resizes
-		// correctly when widgets are shown or hidden dynamically.
-		node.size[0] = Math.max(node.size[0], sz[0]);
-		node.size[1] = sz[1];
+		const newW = Math.max(node.size[0], sz[0]);
+		const newH = sz[1];
+		// ALBABIT-FIX: Reassign as new array so Vue 3 reactive proxy detects the change.
+		// Direct mutation (node.size[1] = x) bypasses Vue's setter and leaves blank gaps
+		// when widgets are hidden and the saved node.size is larger than the collapsed sum.
+		node.size = [newW, newH];
 		app.graph.setDirtyCanvas(true, true);
 	}
+}
+
+function refreshNodeSizeWithRetry(node) {
+	refreshNodeSize(node);
+	let retries = 0;
+	const poll = setInterval(() => {
+		if (!node.computeSize) { clearInterval(poll); return; }
+		const target = node.computeSize()[1];
+		if (Math.abs(node.size[1] - target) > 4) {
+			node.size = [node.size[0], target];
+			app.graph.setDirtyCanvas(true, true);
+		}
+		if (++retries >= 5) clearInterval(poll);
+	}, 200);
 }
 
 app.registerExtension({
@@ -175,7 +191,47 @@ app.registerExtension({
 			};
 		}
 
-		// 2. Digital Cinema Write — smart show/hide toggles
+		// 2. Digital Cinema Read — widget visibility by read_mode
+		if (nodeData.name === "RadianceDigitalCinemaRead") {
+			const onNodeCreatedRead = nodeType.prototype.onNodeCreated;
+			nodeType.prototype.onNodeCreated = function () {
+				const r = onNodeCreatedRead ? onNodeCreatedRead.apply(this, arguments) : undefined;
+				const node = this;
+
+				const readModeWidget   = this.widgets.find(w => w.name === "read_mode");
+				const startFrameWidget = this.widgets.find(w => w.name === "start_frame");
+				const frameLimitWidget = this.widgets.find(w => w.name === "frame_limit");
+				const frameNumberWidget = this.widgets.find(w => w.name === "frame_number");
+				const fpsOverrideWidget = this.widgets.find(w => w.name === "fps_override");
+
+				const updateReadWidgets = () => {
+					const mode = readModeWidget ? readModeWidget.value : "Auto";
+					const isSingle = mode === "Single Frame";
+
+					setWidgetVisible(startFrameWidget,  !isSingle, node);
+					setWidgetVisible(frameLimitWidget,  !isSingle, node);
+					setWidgetVisible(frameNumberWidget,  isSingle, node);
+					setWidgetVisible(fpsOverrideWidget, !isSingle, node);
+
+					refreshNodeSize(node);
+				};
+
+				if (readModeWidget) {
+					const origReadCb = readModeWidget.callback;
+					readModeWidget.callback = function () {
+						if (origReadCb) origReadCb.apply(this, arguments);
+						updateReadWidgets();
+					};
+				}
+
+				setTimeout(updateReadWidgets, 100);
+				setTimeout(() => refreshNodeSizeWithRetry(node), 500);
+
+				return r;
+			};
+		}
+
+		// 3. Digital Cinema Write — smart show/hide toggles
 		// FIX 1: was "◎ RadianceDigitalCinemaWrite"
 		if (nodeData.name === "RadianceDigitalCinemaWrite") {
 			const onNodeCreated = nodeType.prototype.onNodeCreated;
@@ -193,6 +249,7 @@ app.registerExtension({
 				const alphaModeWidget   = this.widgets.find(w => w.name === "alpha_mode");
 				const metadataWidget    = this.widgets.find(w => w.name === "custom_metadata");
 				// ALBABIT-FIX: Audio export widgets — suffix only relevant when a format is chosen.
+				const framePaddingWidget = this.widgets.find(w => w.name === "frame_padding");
 				const audioExportWidget = this.widgets.find(w => w.name === "write_external_audio_file");
 				const audioSuffixWidget = this.widgets.find(w => w.name === "audio_filename_suffix");
 
@@ -238,8 +295,11 @@ app.registerExtension({
 					// FPS only relevant for video
 					setWidgetVisible(fpsWidget, isVideo, node);
 
-					// Start frame only relevant for sequences
-					setWidgetVisible(startFrameWidget, isSequence, node);
+					// Start frame and frame_padding only relevant for sequences
+					setWidgetVisible(startFrameWidget,   isSequence, node);
+					// frame_padding controls zero-padding in filenames (e.g. 0001 vs 000001) —
+					// meaningless for Single Image since only one file is written.
+					setWidgetVisible(framePaddingWidget, isSequence, node);
 
 					// EXR/PNG-specific controls only in sequence/single modes
 					setWidgetVisible(bitDepthWidget,    isSeqLike && (is_exr || is_png), node);
@@ -260,10 +320,10 @@ app.registerExtension({
 				// ALBABIT-FIX: Recompute suffix visibility when write_audio format changes.
 				if (audioExportWidget) audioExportWidget.callback = updateWidgets;
 
-				// ALBABIT-FIX: 100ms delay (was 20ms) to ensure ComfyUI has fully initialised
-				// all widgets — especially multiline STRING textareas whose computeSize
-				// may not be set yet at 20ms, causing a stale save and a 20px-high restore.
+				// ALBABIT-FIX: 100ms delay to ensure ComfyUI has fully initialised all widgets
+				// (especially multiline STRING textareas). Retry resize for Vue reactivity.
 				setTimeout(updateWidgets, 100);
+				setTimeout(() => refreshNodeSizeWithRetry(node), 500);
 
 				return r;
 			};
