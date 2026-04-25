@@ -301,8 +301,9 @@ app.registerExtension({
 					// meaningless for Single Image since only one file is written.
 					setWidgetVisible(framePaddingWidget, isSequence, node);
 
-					// EXR/PNG-specific controls only in sequence/single modes
-					setWidgetVisible(bitDepthWidget,    isSeqLike && (is_exr || is_png), node);
+					// ALBABIT-FIX: bit_depth is EXR-only (Half Float vs Full Float).
+					// PNG encodes depth in the format name; HDR is always 32-bit RGBE — both ignore this param.
+					setWidgetVisible(bitDepthWidget,    isSeqLike && is_exr, node);
 					setWidgetVisible(compressionWidget, isSeqLike && is_exr, node);
 					setWidgetVisible(alphaModeWidget,   isSeqLike, node);
 					setWidgetVisible(metadataWidget,    isSeqLike, node);

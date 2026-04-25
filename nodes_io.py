@@ -47,6 +47,16 @@ except ImportError:
     except ImportError:
         write_exr_multipart = None
 
+# ALBABIT-FIX: PIL used for 8-bit PNG tEXt metadata chunks and RGBA alpha writing.
+try:
+    from PIL import Image as PILImage
+    from PIL.PngImagePlugin import PngInfo as PNGInfo
+    _HAS_PIL = True
+except ImportError:
+    PILImage = None
+    PNGInfo  = None
+    _HAS_PIL = False
+
 
 logger = logging.getLogger("Radiance.io")
 
@@ -356,8 +366,10 @@ class RadianceDigitalCinemaRead:
                     "tooltip": "Maximum frames to load. 0 = load all."}),
                 "frame_number": ("INT", {"default": 1, "min": 1, "max": 999999,
                     "tooltip": (
-                        "Frame to extract in 'Single Frame' mode (1-based). "
-                        "Ignored in other modes."
+                        "Frame to extract in 'Single Frame' mode (1-based).\n"
+                        "• Video source: seeks to the specified frame via VideoCapture.\n"
+                        "• Image file (EXR, PNG, etc.): ignored — a single image has only one frame.\n"
+                        "Has no effect in Auto, Video, or Sequence modes."
                     ),
                 }),
                 # ALBABIT-FIX: Default changed from "sRGB (Standard)" to "Linear (sRGB)".
@@ -365,7 +377,11 @@ class RadianceDigitalCinemaRead:
                 # "Linear (sRGB)" is the correct default for the majority of use cases.
                 "input_colorspace": (INPUT_COLORSPACES, {"default": "Linear (sRGB)"}),
                 "fps_override": ("FLOAT", {"default": 0.0, "min": 0.0,
-                    "tooltip": "Override detected FPS. 0 = auto-detect (video) or 24.0 (sequence)."}),
+                    "tooltip": (
+                        "Override detected FPS. 0 = auto-detect (video) or 24.0 (sequence).\n"
+                        "Not available in Single Frame mode — FPS has no meaning for a still image."
+                    ),
+                }),
             },
         }
 
@@ -466,6 +482,37 @@ class RadianceDigitalCinemaRead:
             img     = None
             mask_np = None
 
+            # ALBABIT-FIX: Video source in Single Frame mode — seek to frame_number via VideoCapture.
+            # cv2.imread() cannot decode video containers; VideoCapture is required for seeking.
+            if _is_video_file(source_path):
+                cap = cv2.VideoCapture(source_path)
+                if not cap.isOpened():
+                    raise IOError(
+                        f"[Cinema Read] Cannot open video '{source_path}'. "
+                        f"Exotic formats (.r3d, .braw, .mxf) require ffmpeg in PATH."
+                    )
+                total        = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                detected_fps = cap.get(cv2.CAP_PROP_FPS)
+                if detected_fps < 1.0 or detected_fps > 1000.0:
+                    detected_fps = 24.0
+                width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                seek   = max(0, min(frame_number - 1, max(0, total - 1)))
+                cap.set(cv2.CAP_PROP_POS_FRAMES, seek)
+                ret, frame = cap.read()
+                cap.release()
+                if not ret:
+                    raise IOError(
+                        f"[Cinema Read] Could not read frame {frame_number} from '{source_path}' "
+                        f"(total: {total} frames)."
+                    )
+                img_f32 = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+                frame_t = torch.from_numpy(img_f32[:, :, :3].copy()).unsqueeze(0);  del img_f32
+                images  = apply_input_transform(frame_t, input_colorspace)
+                mask    = torch.ones((1, height, width), dtype=torch.float32)
+                logger.info(f"[Cinema Read] Single Frame #{frame_number}/{total} from video '{os.path.basename(source_path)}' ({width}×{height})")
+                return (images, mask, 1, width, height, float(detected_fps), None, source_path)
+
             if ext in (".exr", ".hdr"):
                 try:
                     rgb_np, alpha_np, _ = self._load_single_exr(source_path)
@@ -502,7 +549,8 @@ class RadianceDigitalCinemaRead:
                 img = img.astype(np.float32)
 
             height, width = img.shape[:2]
-            fps    = fps_override if fps_override > 0 else 24.0
+            # ALBABIT-FIX: fps_override is ignored in Single Frame mode — FPS has no meaning for a still image.
+            fps = 24.0
             frame_t = torch.from_numpy(img[:, :, :3].copy()).unsqueeze(0)
             del img
             images = apply_input_transform(frame_t, input_colorspace)
@@ -754,6 +802,15 @@ def _norm_compression(comp: str) -> str:
         return "NO_COMPRESSION"
     return comp
 
+# ALBABIT-FIX: Build a PIL PngInfo object from a metadata dict for tEXt chunk embedding.
+def _build_pnginfo(meta: dict):
+    if not _HAS_PIL:
+        return None
+    info = PNGInfo()
+    for k, v in meta.items():
+        info.add_text(str(k), str(v))
+    return info
+
 # ───────────────────────────────────────────────────────────────────────────────
 # Network / Remote output helper
 # ───────────────────────────────────────────────────────────────────────────────
@@ -847,7 +904,7 @@ class RadianceDigitalCinemaWrite:
                     ),
                 }),
                 "broadcast_safe": ("BOOLEAN", {
-                    "default": True,
+                    "default": False,
                     "tooltip": (
                         "Clamps output values to [0.0–1.0] and applies a filmic ACES tone curve. "
                         "Only active when output_color_space is set to 'sRGB (Standard)'.\n"
@@ -899,12 +956,13 @@ class RadianceDigitalCinemaWrite:
                 "alpha_mode": (ALPHA_MODES, {
                     "default": "From Image",
                     "tooltip": (
-                        "Alpha channel handling for formats that support transparency (PNG, EXR).\n"
-                        "• None: discard alpha — export as RGB.\n"
+                        "Alpha channel handling for formats that support transparency.\n"
+                        "• None: discard alpha — export as RGB / RGB-only.\n"
                         "• From Image: use alpha channel from the source image if present.\n"
                         "• Solid White: force alpha = 1.0 (fully opaque).\n"
                         "• Solid Black: force alpha = 0.0 (fully transparent).\n"
-                        "Note: alpha is currently only embedded in EXR output."
+                        "Supported formats: EXR (RGBA float), PNG 8-bit (RGBA via PIL), PNG 16-bit (RGBA via cv2).\n"
+                        "Not applicable to TIFF, JPEG, Radiance HDR, or video formats."
                     ),
                 }),
                 "frame_padding": ("INT", {"default": 4, "min": 1, "max": 8, "step": 1,
@@ -935,7 +993,8 @@ class RadianceDigitalCinemaWrite:
                         "Enter one entry per line in 'key=value' format "
                         "(e.g. 'shot=sh010' or 'colorspace=ACEScg').\n"
                         "• EXR: written as named EXR header attributes.\n"
-                        "• PNG: written into tEXt chunks.\n"
+                        "• PNG 8-bit: written as tEXt chunks via PIL.\n"
+                        "• PNG 16-bit: metadata not written (cv2 limitation — use EXR for full metadata support).\n"
                         "• Other formats: metadata may be silently ignored depending on container support."
                     ),
                 }),
@@ -956,7 +1015,7 @@ class RadianceDigitalCinemaWrite:
 
 class RadianceWrite:
     def write(self, image, filename_prefix, write_mode="Video", output_format="", fps=24.0, quality=80,
-              output_color_space="sRGB (Standard)", broadcast_safe=True, audio=None,
+              output_color_space="sRGB (Standard)", broadcast_safe=False, audio=None,
               output_path="", remote_path="", start_frame=1, bit_depth="32-bit Float", compression="ZIP",
               alpha_mode="From Image", frame_padding=4, custom_metadata="",
               write_external_audio_file="None", audio_filename_suffix="_audio",
@@ -1330,24 +1389,24 @@ class RadianceWrite:
             num        = str(start + i).zfill(padding)
             frame_meta = {**meta, "frame": start + i}
 
+            # ALBABIT-FIX: Extract alpha once per frame — shared by EXR and PNG paths.
+            alpha_np = None
+            if alpha_mode != "None" and images_tensor is not None:
+                t = images_tensor[i] if images_tensor.dim() == 4 else images_tensor
+                if t.shape[-1] == 4:
+                    if alpha_mode == "From Image":
+                        alpha_np = t[..., 3].cpu().numpy().astype(np.float32)
+                    elif alpha_mode == "Solid White":
+                        alpha_np = np.ones(frame.shape[:2], dtype=np.float32)
+                    elif alpha_mode == "Solid Black":
+                        alpha_np = np.zeros(frame.shape[:2], dtype=np.float32)
+                elif alpha_mode in ("Solid White", "Solid Black"):
+                    alpha_np = np.ones(frame.shape[:2], dtype=np.float32) if alpha_mode == "Solid White" else np.zeros(frame.shape[:2], dtype=np.float32)
+
             if "EXR" in fmt:
                 ext   = ".exr"
                 fname = f"{prefix}{ext}" if is_single_image else f"{prefix}.{num}{ext}"
                 fpath = os.path.join(target, fname)
-
-                # Extract alpha channel from original tensor for EXR RGBA embedding.
-                alpha_np = None
-                if alpha_mode != "None" and images_tensor is not None:
-                    t = images_tensor[i] if images_tensor.dim() == 4 else images_tensor
-                    if t.shape[-1] == 4:
-                        if alpha_mode == "From Image":
-                            alpha_np = t[..., 3].cpu().numpy().astype(np.float32)
-                        elif alpha_mode == "Solid White":
-                            alpha_np = np.ones(frame.shape[:2], dtype=np.float32)
-                        elif alpha_mode == "Solid Black":
-                            alpha_np = np.zeros(frame.shape[:2], dtype=np.float32)
-                    elif alpha_mode in ("Solid White", "Solid Black"):
-                        alpha_np = np.ones(frame.shape[:2], dtype=np.float32) if alpha_mode == "Solid White" else np.zeros(frame.shape[:2], dtype=np.float32)
 
                 if write_exr_robust:
                     success = False
@@ -1401,16 +1460,35 @@ class RadianceWrite:
                     logger.error(f"[Cinema Write] TIFF 16-bit write failed for: {fpath}")
 
             else:  # PNG
-                ext   = ".png"
-                fname = f"{prefix}{ext}" if is_single_image else f"{prefix}.{num}{ext}"
-                fpath = os.path.join(target, fname)
-                if "8-bit" in fmt:
-                    data = (np.clip(frame, 0, 1) * 255).astype(np.uint8)
+                ext    = ".png"
+                fname  = f"{prefix}{ext}" if is_single_image else f"{prefix}.{num}{ext}"
+                fpath  = os.path.join(target, fname)
+                is_8bit = "8-bit" in fmt
+                data_f  = np.clip(frame, 0, 1)
+                if is_8bit and _HAS_PIL:
+                    # ALBABIT-FIX: 8-bit PNG — PIL writes tEXt metadata chunks and supports RGBA.
+                    data_u8 = (data_f * 255).astype(np.uint8)
+                    pnginfo = _build_pnginfo(frame_meta)
+                    if alpha_np is not None:
+                        alpha_u8 = (np.clip(alpha_np, 0, 1) * 255).astype(np.uint8)
+                        pil_img  = PILImage.fromarray(np.dstack([data_u8, alpha_u8]), "RGBA")
+                    else:
+                        pil_img  = PILImage.fromarray(data_u8, "RGB")
+                    pil_img.save(fpath, pnginfo=pnginfo)
                 else:
-                    data = (np.clip(frame, 0, 1) * 65535).astype(np.uint16)
-                ok = cv2.imwrite(fpath, cv2.cvtColor(data, cv2.COLOR_RGB2BGR))
-                if not ok:
-                    logger.error(f"[Cinema Write] cv2.imwrite failed for: {fpath}")
+                    # ALBABIT-FIX: 16-bit PNG — cv2 handles uint16 BGRA natively.
+                    # tEXt metadata is not written (cv2 limitation); use 8-bit or EXR for embedded metadata.
+                    scale    = 255 if is_8bit else 65535
+                    dtype    = np.uint8 if is_8bit else np.uint16
+                    data_px  = (data_f * scale).astype(dtype)
+                    if alpha_np is not None:
+                        alpha_px = (np.clip(alpha_np, 0, 1) * scale).astype(dtype)
+                        data_out = cv2.cvtColor(np.dstack([data_px, alpha_px]).astype(dtype), cv2.COLOR_RGBA2BGRA)
+                    else:
+                        data_out = cv2.cvtColor(data_px, cv2.COLOR_RGB2BGR)
+                    ok = cv2.imwrite(fpath, data_out)
+                    if not ok:
+                        logger.error(f"[Cinema Write] cv2.imwrite failed for: {fpath}")
             paths.append(fpath)
 
         if not paths:

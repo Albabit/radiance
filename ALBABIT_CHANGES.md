@@ -82,6 +82,39 @@ Frontend companion for `RadianceAIUpscale`. Manages dynamic widget visibility.
 
 ### `nodes_io.py`
 
+#### `bit_depth` widget: restricted to EXR only
+- Previously visible for EXR and PNG — PNG encodes its depth in the format name ("PNG (8-bit)" / "PNG (16-bit)"), `bit_depth` was silently ignored for PNG and Radiance HDR
+- Now hidden for PNG and HDR formats; only shown for EXR (Half Float vs Full Float) — fix in `radiance_io.js`
+
+#### PNG alpha channel support
+- `alpha_mode` now fully functional for PNG (was EXR-only)
+- 8-bit PNG: written via PIL as RGBA + tEXt metadata chunks
+- 16-bit PNG: written via cv2 as BGRA uint16 (alpha supported; tEXt metadata not written — cv2 limitation)
+- Alpha extraction refactored: moved before the format if/elif chain, shared by EXR and PNG paths
+
+#### PNG tEXt metadata (`custom_metadata`)
+- 8-bit PNG: metadata written as tEXt chunks via PIL `PngInfo`
+- 16-bit PNG: metadata not written (cv2 limitation — use EXR for full metadata support)
+- PIL import added with `_HAS_PIL` flag + `_build_pnginfo()` helper
+
+#### `broadcast_safe` default changed to `False`
+- INPUT_TYPES default: `True` → `False`
+- Python function signature: `broadcast_safe=True` → `False` (aligned with UI default for consistency)
+- Python gating on `is_display_space` unchanged — `broadcast_safe` has no effect outside sRGB anyway
+
+#### `RadianceDigitalCinemaRead` — `frame_number` video seeking implemented
+- Previously declared in INPUT_TYPES and shown in Single Frame mode but never read in Python
+- New code path at the top of the Single Frame section: detects video via `_is_video_file()`, opens via `VideoCapture`, seeks with `cap.set(CAP_PROP_POS_FRAMES, frame_number - 1)`, clamps to total frame count
+- Image sources (EXR, PNG, etc.): `frame_number` is silently ignored — a still image has exactly one frame
+- FPS returned: `detected_fps` from the video container (not `fps_override`, which is disabled in Single Frame mode)
+
+#### `RadianceDigitalCinemaRead` — `fps_override` disabled in Single Frame mode
+- Python: `fps = fps_override if fps_override > 0 else 24.0` → `fps = 24.0` (hardcoded)
+- JS: already hidden via `!isSingle` — no change needed
+- FPS has no semantic meaning for a single still image
+
+---
+
 #### Audio export: new `write_external_audio_file` dropdown
 - Replaces the old boolean `extract_audio_wav`
 - Options: `"None"`, `"WAV — PCM 32-bit Float"`, `"WAV — PCM 24-bit"`, `"WAV — PCM 16-bit"`, `"AIFF — PCM 24-bit"`, `"FLAC — Lossless"`
@@ -177,6 +210,10 @@ Four-mechanism visibility supporting both LiteGraph canvas and Nodes 2.0:
 
 #### Read node widget visibility *(new section)*
 - Added `RadianceDigitalCinemaRead` handler — hides `start_frame`, `frame_limit`, `fps_override` in Single Frame mode; shows `frame_number` instead
+
+#### `bit_depth` visibility fix
+- `setWidgetVisible(bitDepthWidget, isSeqLike && (is_exr || is_png), node)` → `isSeqLike && is_exr`
+- PNG encodes depth in the format name; Radiance HDR is always 32-bit RGBE — neither uses `bit_depth`
 
 #### Write node: `frame_padding` visibility
 - `frame_padding` hidden for `"Video"` and `"Single Image"` modes (only relevant for `"Sequence"`)
@@ -389,6 +426,6 @@ Frontend companion for the updated loader node — dynamic widget updates for `a
 
 - **No breaking changes** to node names or mandatory inputs for existing Flux/WAN/HunyuanVideo workflows.
 - `write_external_audio_file` dropdown **replaces** the old `extract_audio_wav` boolean — existing saved workflows using the boolean will need to be updated manually.
-- `alpha_mode` is **not yet functional** — all modes output RGB only.
+- `alpha_mode` is now functional for **EXR** (RGBA float) and **PNG** (8-bit RGBA via PIL, 16-bit RGBA via cv2). Not implemented for TIFF, JPEG, Radiance HDR, or video formats.
 - The `"Baked VAE (from UNET)"` default for the VAE widget is a behavior change: users who previously connected an explicit VAE file will need to re-select it.
 - SUPIR requires the ComfyUI-SUPIR extension (kijai/ComfyUI-SUPIR) to be installed via ComfyUI Manager.
