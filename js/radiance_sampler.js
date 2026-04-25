@@ -552,13 +552,33 @@ app.registerExtension({
             setTimeout(() => {
                 const val = presetWidget.value;
                 if (val) {
-                    lastPresetValue = val; 
+                    lastPresetValue = val;
                     updateUILocks(this, val);
                     updateDescription(val);
                 }
                 toggleDynamicFields();
                 if (this.checkSigmaConnection) this.checkSigmaConnection();
             }, 100);
+
+            // ALBABIT-FIX: Store restore fn for onConfigure / loadedGraphNode / afterConfigureGraph.
+            const samplerNode = this;
+            const samplerRestoreFn = () => {
+                const val = presetWidget ? presetWidget.value : null;
+                if (val) {
+                    updateUILocks(samplerNode, val);
+                    updateDescription(val);
+                }
+                toggleDynamicFields();
+                if (samplerNode.checkSigmaConnection) samplerNode.checkSigmaConnection();
+            };
+            this._radianceUpdateVisibility = samplerRestoreFn;
+            // ALBABIT-FIX: onConfigure fires after widgets_values are restored — setTimeout(10)
+            // lets Vue settle reactivity before setting options.hidden (Nodes 2.0 fix).
+            const origSamplerConfigure = this.onConfigure;
+            this.onConfigure = function(info) {
+                if (origSamplerConfigure) origSamplerConfigure.call(this, info);
+                setTimeout(samplerRestoreFn, 10);
+            };
 
             // Nodes 2.0: poll bypass/mute state at low frequency since onDrawBackground is not called
             this._sigmaCheckInterval = setInterval(() => {
@@ -589,7 +609,20 @@ app.registerExtension({
             }
             if (origOnRemoved) origOnRemoved.apply(this, arguments);
         };
-    }
+    },
+    // ALBABIT-FIX: loadedGraphNode / afterConfigureGraph — see radiance_io.js for rationale.
+    loadedGraphNode(node) {
+        if (node._radianceUpdateVisibility) {
+            setTimeout(node._radianceUpdateVisibility, 100);
+        }
+    },
+    async afterConfigureGraph() {
+        for (const node of app.graph._nodes) {
+            if (node._radianceUpdateVisibility) {
+                node._radianceUpdateVisibility();
+            }
+        }
+    },
 });
 
 console.log("[Radiance Sampler] Extension loaded");

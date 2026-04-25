@@ -112,6 +112,14 @@ app.registerExtension({
 			// Pass 2 (500ms): force correct height after Vue's initial layout,
 			// with polling retry in case Vue defers layout further.
 			setTimeout(updateSupirWidgets, 100);
+			// ALBABIT-FIX: Store fn for onConfigure / loadedGraphNode / afterConfigureGraph.
+			node._radianceUpdateVisibility = updateSupirWidgets;
+			// ALBABIT-FIX: See radiance_io.js for rationale.
+			const origUpscaleConfigure = node.onConfigure;
+			node.onConfigure = function(info) {
+				if (origUpscaleConfigure) origUpscaleConfigure.call(this, info);
+				setTimeout(updateSupirWidgets, 10);
+			};
 			setTimeout(() => {
 				refreshNodeSize(node);
 				let retries = 0;
@@ -128,5 +136,18 @@ app.registerExtension({
 
 			return r;
 		};
-	}
+	},
+	// ALBABIT-FIX: loadedGraphNode / afterConfigureGraph — see radiance_io.js for rationale.
+	loadedGraphNode(node) {
+		if (node._radianceUpdateVisibility) {
+			setTimeout(node._radianceUpdateVisibility, 100);
+		}
+	},
+	async afterConfigureGraph() {
+		for (const node of app.graph._nodes) {
+			if (node._radianceUpdateVisibility) {
+				node._radianceUpdateVisibility();
+			}
+		}
+	},
 });

@@ -60,6 +60,11 @@ except ImportError:
 
 logger = logging.getLogger("Radiance.io")
 
+# ALBABIT-FIX: Strip surrounding quotes from path strings.
+# Windows "Copy as path" (Shift+Right-click) wraps paths in double-quotes.
+def _strip_path_quotes(path: str) -> str:
+    return path.strip().strip('"').strip("'")
+
 # ── Memory budget helpers ──────────────────────────────────────────────────────
 
 def _available_ram_bytes() -> int:
@@ -343,7 +348,9 @@ class RadianceDigitalCinemaRead:
                     "tooltip": (
                         "Path to a video file (any extension), image sequence folder, "
                         "or single image. Absolute paths are supported. "
-                        "For sequences: point to the folder or a single file in the sequence."
+                        "For sequences: point to the folder or a single file in the sequence.\n"
+                        "Forward slashes and backslashes are both accepted. "
+                        "Paths wrapped in quotes (e.g. \"D:\\Footage\\shot.mp4\") are also accepted."
                     ),
                 }),
                 "read_mode": (
@@ -447,6 +454,8 @@ class RadianceDigitalCinemaRead:
 
     def read(self, source_path, read_mode="Auto", start_frame=1, frame_limit=0,
              frame_number=1, input_colorspace="sRGB (Standard)", fps_override=0.0):
+
+        source_path = _strip_path_quotes(source_path)
 
         # ── Path resolution ────────────────────────────────────────────────────
         resolved = None
@@ -924,7 +933,8 @@ class RadianceDigitalCinemaWrite:
                         "• Relative path (e.g. 'MyProject/Renders'): subfolder created inside the "
                         "ComfyUI output directory. Do NOT start with '/' or '\\'.\n"
                         "• Absolute path (e.g. 'D:/VFX/Shots/sh010'): writes directly to that location.\n"
-                        "Forward slashes and backslashes are both accepted."
+                        "Forward slashes and backslashes are both accepted. "
+                        "Paths wrapped in quotes (e.g. \"D:\\Renders\") are also accepted."
                     ),
                 }),
                 "remote_path": ("STRING", {
@@ -933,7 +943,8 @@ class RadianceDigitalCinemaWrite:
                         "Optional remote output path. Supports:\n"
                         "  UNC:  \\\\server\\share\\folder\n"
                         "  S3:   s3://bucket/prefix\n"
-                        "Leave empty to write locally only."
+                        "Leave empty to write locally only. "
+                        "Paths wrapped in quotes are accepted."
                     ),
                 }),
                 "start_frame": ("INT", {"default": 1, "min": 0}),
@@ -1020,6 +1031,9 @@ class RadianceWrite:
               alpha_mode="From Image", frame_padding=4, custom_metadata="",
               write_external_audio_file="None", audio_filename_suffix="_audio",
               prompt=None, extra_pnginfo=None):
+
+        output_path  = _strip_path_quotes(output_path)
+        remote_path  = _strip_path_quotes(remote_path)
 
         if hasattr(image, "get_components"): image = image.get_components().images
         elif isinstance(image, dict) and "samples" in image: image = image["samples"]
@@ -1582,8 +1596,10 @@ class RadianceEXRMultiPart:
                 "custom_1_name": ("STRING", {"default": "emission"}),
                 "custom_2": ("IMAGE", {"tooltip": "Custom AOV 2."}),
                 "custom_2_name": ("STRING", {"default": "specular"}),
-                "output_path": ("STRING", {"default": ""}),
-                "remote_path": ("STRING", {"default": "", "tooltip": "Optional S3 or UNC remote path."}),
+                "output_path": ("STRING", {"default": "",
+                    "tooltip": "Output directory for saved EXR files. Absolute or relative to ComfyUI output. Paths wrapped in quotes are accepted."}),
+                "remote_path": ("STRING", {"default": "",
+                    "tooltip": "Optional S3 or UNC remote path. Paths wrapped in quotes are accepted."}),
                 "frame_index": ("INT", {"default": 1, "min": 1}),
                 "custom_metadata": ("STRING", {"default": "", "multiline": True,
                     "tooltip": "Optional key=value metadata lines embedded in EXR header."}),
@@ -1608,6 +1624,9 @@ class RadianceEXRMultiPart:
         frame_index: int = 1,
         custom_metadata: str = "",
     ) -> Tuple[str]:
+
+        output_path = _strip_path_quotes(output_path)
+        remote_path = _strip_path_quotes(remote_path)
 
         out_dir = get_safe_output_dir(
             folder_paths.get_output_directory(), output_path, allow_absolute=True

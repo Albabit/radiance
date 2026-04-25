@@ -225,6 +225,16 @@ app.registerExtension({
 				}
 
 				setTimeout(updateReadWidgets, 100);
+				// ALBABIT-FIX: Store fn for loadedGraphNode / afterConfigureGraph.
+				node._radianceUpdateVisibility = updateReadWidgets;
+				// ALBABIT-FIX: onConfigure fires after widgets_values are restored from the
+				// saved graph. setTimeout(10) lets Vue settle reactivity before we set
+				// options.hidden, fixing the "widgets reappear on refresh" bug in Nodes 2.0.
+				const origReadConfigure = node.onConfigure;
+				node.onConfigure = function(info) {
+					if (origReadConfigure) origReadConfigure.call(this, info);
+					setTimeout(updateReadWidgets, 10);
+				};
 				setTimeout(() => refreshNodeSizeWithRetry(node), 500);
 
 				return r;
@@ -324,10 +334,38 @@ app.registerExtension({
 				// ALBABIT-FIX: 100ms delay to ensure ComfyUI has fully initialised all widgets
 				// (especially multiline STRING textareas). Retry resize for Vue reactivity.
 				setTimeout(updateWidgets, 100);
+				// ALBABIT-FIX: Store fn for loadedGraphNode / afterConfigureGraph.
+				node._radianceUpdateVisibility = updateWidgets;
+				// ALBABIT-FIX: See Read node comment above — same rationale.
+				const origWriteConfigure = node.onConfigure;
+				node.onConfigure = function(info) {
+					if (origWriteConfigure) origWriteConfigure.call(this, info);
+					setTimeout(updateWidgets, 10);
+				};
 				setTimeout(() => refreshNodeSizeWithRetry(node), 500);
 
 				return r;
 			};
 		}
-	}
+	},
+	// ALBABIT-FIX: loadedGraphNode fires after ALL nodes are configured and
+	// widgets_values are fully restored — catches cases where onConfigure alone
+	// fires too early for Vue to have mounted its reactive component.
+	loadedGraphNode(node) {
+		if (node._radianceUpdateVisibility) {
+			setTimeout(node._radianceUpdateVisibility, 100);
+		}
+	},
+	// ALBABIT-FIX: afterConfigureGraph is async — by the time it fires, Vue has
+	// crossed its await boundary and node.widgets is a reactive proxy. A direct
+	// call (no inner setTimeout) triggers splice(0,0) on the live reactive array,
+	// forcing Vue to re-render with the correct options.hidden state.
+	// This is the primary fix for saved-workflow restore in Nodes 2.0.
+	async afterConfigureGraph() {
+		for (const node of app.graph._nodes) {
+			if (node._radianceUpdateVisibility) {
+				node._radianceUpdateVisibility();
+			}
+		}
+	},
 });

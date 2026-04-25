@@ -19,6 +19,10 @@ except Exception:
 
 logger = logging.getLogger("◎ Radiance.qc")
 
+# ALBABIT-FIX: Strip surrounding quotes from path strings (Windows "Copy as path").
+def _strip_path_quotes(path: str) -> str:
+    return path.strip().strip('"').strip("'")
+
 
 class RadianceQC:
     """
@@ -366,7 +370,7 @@ class RadianceQCExport:
         return {
             "required": {
                 "qc_report_json": ("STRING", {"forceInput": True}),
-                "output_path": ("STRING", {"default": "", "tooltip": "Output directory for reports. Leave empty to use ComfyUI's default output folder."}),
+                "output_path": ("STRING", {"default": "", "tooltip": "Output directory for reports. Leave empty to use ComfyUI's default output folder. Paths wrapped in quotes are accepted."}),
                 "filename_prefix": ("STRING", {"default": "qc_report"}),
                 "export_format": (["json", "csv", "html", "all"], {"default": "json"}),
             }
@@ -388,6 +392,8 @@ class RadianceQCExport:
         try:
             from pathlib import Path
             from datetime import datetime
+
+            output_path = _strip_path_quotes(output_path)
 
             # Parse JSON
             report = json.loads(qc_report_json)

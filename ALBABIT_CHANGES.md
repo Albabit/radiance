@@ -78,7 +78,22 @@ Frontend companion for `RadianceAIUpscale`. Manages dynamic widget visibility.
 - `refreshNodeSize()`: uses `node.size = [w, h]` (new array) so Vue 3 reactive proxy detects the change
 - Two-pass + polling resize strategy: 100ms initial hide, 500ms size correction, 5× polling retry at 200ms intervals for deferred Vue layouts
 
+#### Widget visibility restore on page refresh / tab switch (Nodes 2.0 fix)
+- Added `onConfigure` hook with `setTimeout(fn, 10)` — fires after `widgets_values` are restored, schedules re-evaluation before Vue settles reactivity
+- Added `loadedGraphNode` hook with `setTimeout(fn, 100)` — fallback for the full saved-workflow restore path
+- Added `async afterConfigureGraph()` hook with direct call (no inner `setTimeout`) — at this point Vue has crossed its `await` boundary and `node.widgets` is a reactive proxy; direct `splice(0,0)` triggers correct re-render
+- `_radianceUpdateVisibility` stored on node instance for all three hooks to share
+
 ---
+
+### `nodes_io.py` + `nodes_qc.py`
+
+#### Path inputs: surrounding quotes stripped automatically
+- Windows "Copy as path" (Shift+Right-click) wraps paths in double-quotes — these are now accepted as-is
+- `_strip_path_quotes()` helper added to both files; strips leading/trailing `"` and `'` plus whitespace
+- Applied to: `RadianceDigitalCinemaRead.source_path`, `RadianceWrite.output_path` / `remote_path`, `RadianceEXRWriteMultipart.output_path` / `remote_path`, `QCReportExporter.output_path`
+- Forward slashes and backslashes continue to work unchanged
+- Tooltips updated on all affected path fields
 
 ### `nodes_io.py`
 
@@ -217,6 +232,10 @@ Four-mechanism visibility supporting both LiteGraph canvas and Nodes 2.0:
 
 #### Write node: `frame_padding` visibility
 - `frame_padding` hidden for `"Video"` and `"Single Image"` modes (only relevant for `"Sequence"`)
+
+#### Widget visibility restore on page refresh / tab switch (Nodes 2.0 fix)
+- Same three-hook pattern as `radiance_upscale.js` — `onConfigure` + `loadedGraphNode` + `afterConfigureGraph`
+- `afterConfigureGraph` also covers `radiance_sampler.js` and `radiance_upscale.js` nodes via the shared `_radianceUpdateVisibility` scan
 
 ---
 
@@ -376,6 +395,10 @@ Frontend companion for the updated loader node — dynamic widget updates for `a
 - Added `terminal_sigma_to_zero` to the list of widgets auto-hidden when a sigma override is connected
 - `checkSigmaConnection()` method added — monitors sigma input connection via `onDrawBackground` and toggles widget visibility in real time
 
+#### Widget visibility restore on page refresh / tab switch (Nodes 2.0 fix)
+- Same three-hook pattern as `radiance_upscale.js` — `onConfigure` + `loadedGraphNode` + `afterConfigureGraph`
+- `samplerRestoreFn` stored as `_radianceUpdateVisibility`; calls `updateUILocks`, `updateDescription`, `toggleDynamicFields`, `checkSigmaConnection`
+
 ---
 
 ### `nodes_depth.py`
@@ -407,6 +430,8 @@ Frontend companion for the updated loader node — dynamic widget updates for `a
 
 | Hash | Description |
 |------|-------------|
+| `pending` | fix(js): widget visibility restore on page refresh / tab switch — Nodes 2.0 |
+| `pending` | fix: strip surrounding quotes from path inputs (Windows Copy-as-path) |
 | `951ecf2` | fix(nodes_io): PNG alpha+metadata, video frame seeking, bit_depth EXR-only |
 | `a3493ea` | feat(upscale): SUPIR integration + radiance_upscale.js + Read node Single Frame fix + io sizing |
 | `374a138` | fix(nodes_io): separate write_exr_multipart import + add OPENCV_IO_ENABLE_OPENEXR |
