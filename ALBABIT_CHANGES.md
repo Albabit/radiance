@@ -407,7 +407,8 @@ Frontend companion for the updated loader node — dynamic widget updates for `a
 
 | Hash | Description |
 |------|-------------|
-| `b9c01c5` | feat(upscale): SUPIR integration + radiance_upscale.js + Read node Single Frame fix + io sizing |
+| `951ecf2` | fix(nodes_io): PNG alpha+metadata, video frame seeking, bit_depth EXR-only |
+| `a3493ea` | feat(upscale): SUPIR integration + radiance_upscale.js + Read node Single Frame fix + io sizing |
 | `374a138` | fix(nodes_io): separate write_exr_multipart import + add OPENCV_IO_ENABLE_OPENEXR |
 | `e0d52af` | fix(nodes_io): merge developer bug fixes and memory management improvements |
 | `d5033cf` | fix(js): Nodes 2.0 widget visibility across all three UI extensions |
