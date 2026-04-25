@@ -430,8 +430,7 @@ Frontend companion for the updated loader node — dynamic widget updates for `a
 
 | Hash | Description |
 |------|-------------|
-| `pending` | fix(js): widget visibility restore on page refresh / tab switch — Nodes 2.0 |
-| `pending` | fix: strip surrounding quotes from path inputs (Windows Copy-as-path) |
+| `9131d2f` | fix: widget visibility restore + path quote stripping (JS Nodes 2.0 + Python) |
 | `951ecf2` | fix(nodes_io): PNG alpha+metadata, video frame seeking, bit_depth EXR-only |
 | `a3493ea` | feat(upscale): SUPIR integration + radiance_upscale.js + Read node Single Frame fix + io sizing |
 | `374a138` | fix(nodes_io): separate write_exr_multipart import + add OPENCV_IO_ENABLE_OPENEXR |
