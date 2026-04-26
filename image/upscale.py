@@ -1619,6 +1619,10 @@ class RadianceAIUpscale:
         "4x-AnimeSharp",
         "SwinIR_4x",
         "HAT_4x",
+        # ALBABIT-FIX: High-fidelity DAT feedforward upscalers from Phips (HuggingFace).
+        # DAT architecture — photorealistic, validated for HDR sequences with Refine (HDR) mode.
+        "4xNomos8kDAT",
+        "4xRealWebPhoto_v4_dat2",
         "SUPIR-v0F_fp16",
         "SUPIR-v0Q_fp16",
     ]
@@ -1629,6 +1633,16 @@ class RadianceAIUpscale:
         "RealESRGAN_x4plus": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth",
         "RealESRGAN_x4plus_anime_6B": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.2.4/RealESRGAN_x4plus_anime_6B.pth",
         "RealESRGAN_x2plus": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.1/RealESRGAN_x2plus.pth",
+        # ALBABIT-FIX: Classic feedforward models — HuggingFace mirrors (community hosted).
+        "ESRGAN_4x":      "https://huggingface.co/f5aiteam/Upscale_Models/resolve/main/ESRGAN_4x.pth",
+        "4x-UltraSharp":  "https://huggingface.co/Kim2091/UltraSharp/resolve/main/4x-UltraSharp.pth",
+        "4x-AnimeSharp":  "https://huggingface.co/Kim2091/AnimeSharp/resolve/main/4x-AnimeSharp.pth",
+        "SwinIR_4x":      "https://huggingface.co/LykosAI/Upscalers/resolve/main/SwinIR/SwinIR_4x.pth",
+        # Source filename is HAT-4x.pth but saved locally as HAT_4x.pth (target_path uses model_name).
+        "HAT_4x":         "https://huggingface.co/vladmandic/sdnext-upscalers/resolve/main/HAT-4x.pth",
+        # ALBABIT-FIX: Phips DAT feedforward models (.safetensors, Spandrel-compatible).
+        "4xNomos8kDAT": "https://huggingface.co/Phips/4xNomos8kDAT/resolve/main/4xNomos8kDAT.safetensors",
+        "4xRealWebPhoto_v4_dat2": "https://huggingface.co/Phips/4xRealWebPhoto_v4_dat2/resolve/main/4xRealWebPhoto_v4_dat2.safetensors",
     }
 
     def __init__(self):
@@ -1651,7 +1665,21 @@ class RadianceAIUpscale:
                     ["Standard", "Refine (HDR)", "Normalize (HDR)"],
                     {
                         "default": "Standard",
-                        "tooltip": "Processing mode. 'Standard' = direct upscale. 'Refine (HDR)' = log-compression for highlights. 'Normalize (HDR)' = scales to safe range.",
+                        "tooltip": (
+                            "HDR processing mode for Linear / HDR input images.\n"
+                            "\n"
+                            "• Standard — clips values above 1.0. For SDR (sRGB) sources.\n"
+                            "\n"
+                            "• Refine (HDR) — log1p compression before upscale, expm1 expansion after.\n"
+                            "  Perceptual curve similar to sRGB gamma. Recommended for Linear HDR sources.\n"
+                            "  Soft-clip knee at ~1.718: values above are reconstructed to ~1.718 (chromaticity not preserved).\n"
+                            "\n"
+                            "• Normalize (HDR) — auto-exposure based on scene midtone (geometric mean → 0.18 linear).\n"
+                            "  Ensures the model sees a correctly exposed image. Bright outliers are soft-clipped.\n"
+                            "\n"
+                            "Note (SUPIR only): highlights above the knee are soft-clipped, not reconstructed exactly.\n"
+                            "This is expected and acceptable for VFX compositing workflows."
+                        ),
                     },
                 ),
                 "tile_size": (
@@ -1674,10 +1702,29 @@ class RadianceAIUpscale:
                         "tooltip": "Overlap between tiles to avoid seams.",
                     },
                 ),
+                # ALBABIT-FIX: scale_factor — post-upscale bicubic resize for feedforward models.
+                # 0.0 = native model scale (no resize). Any other value = target scale multiplier.
+                # Example: scale_factor=2.0 with a 4x model → supersampling (4x then down to 2x).
+                # Placed in required so it renders before auto_download (optional renders after all required).
+                # Hidden for SUPIR (which uses supir_scale_by for pre-encode upscaling instead).
+                "scale_factor": (
+                    "FLOAT",
+                    {
+                        "default": 0.0,
+                        "min": 0.0,
+                        "max": 8.0,
+                        "step": 0.25,
+                        "tooltip": (
+                            "Target output scale relative to the input. 0 = native model scale (no resize).\n"
+                            "Example: 2.0 with a 4x model → upscale to 4x then bicubic-downsample to 2x (supersampling).\n"
+                            "Hidden for SUPIR — use supir_scale_by for pre-encode scaling instead."
+                        ),
+                    },
+                ),
                 "auto_download": (
                     "BOOLEAN",
                     {
-                        "default": True,
+                        "default": False,
                         "tooltip": "Automatically download models if not found.",
                     },
                 ),
@@ -1686,7 +1733,7 @@ class RadianceAIUpscale:
                 "unload_model": (
                     "BOOLEAN",
                     {
-                        "default": False,
+                        "default": True,
                         "tooltip": "Unload model from VRAM after processing to free memory.",
                     },
                 ),
@@ -1699,6 +1746,90 @@ class RadianceAIUpscale:
                         "step": 1,
                         "tooltip": "SUPIR only: number of diffusion sampling steps. "
                                    "Higher = better quality but slower. Ignored for all other models.",
+                    },
+                ),
+                "supir_s_churn": (
+                    "INT",
+                    {
+                        "default": 5,
+                        "min": 0,
+                        "max": 40,
+                        "step": 1,
+                        "tooltip": "SUPIR only: EDM stochastic churn. Adds noise between sampling steps "
+                                   "to explore texture variations. Higher = more creative detail, "
+                                   "lower = more faithful to source. 0 = fully deterministic. "
+                                   "Ignored for all other models.",
+                    },
+                ),
+                "seed": (
+                    "INT",
+                    {
+                        "default": 1234,
+                        "min": 0,
+                        "max": 0xffffffffffffffff,
+                        "step": 1,
+                        "tooltip": "SUPIR only: random seed for the diffusion sampler. "
+                                   "Ignored for all other models.",
+                    },
+                ),
+                "supir_cfg_start": (
+                    "FLOAT",
+                    {
+                        "default": 4.0,
+                        "min": 0.0,
+                        "max": 100.0,
+                        "step": 0.1,
+                        "tooltip": "SUPIR only: CFG scale at the first diffusion step. "
+                                   "Set equal to supir_cfg_end to disable linear scaling. "
+                                   "Ignored for all other models.",
+                    },
+                ),
+                "supir_cfg_end": (
+                    "FLOAT",
+                    {
+                        "default": 4.0,
+                        "min": 0.0,
+                        "max": 100.0,
+                        "step": 0.1,
+                        "tooltip": "SUPIR only: CFG scale at the last diffusion step. "
+                                   "Set equal to supir_cfg_start to disable linear scaling. "
+                                   "Ignored for all other models.",
+                    },
+                ),
+                "color_fix_type": (
+                    ["None", "AdaIn", "Wavelet"],
+                    {
+                        "default": "None",
+                        "tooltip": "SUPIR only: color correction applied after upscaling to match "
+                                   "source colors. 'Wavelet' preserves high-frequency detail; "
+                                   "'AdaIn' normalizes global color statistics; 'None' = disabled. "
+                                   "Ignored for all other models.",
+                    },
+                ),
+                "supir_scale_by": (
+                    "FLOAT",
+                    {
+                        "default": 1.0,
+                        "min": 0.5,
+                        "max": 8.0,
+                        "step": 0.25,
+                        "tooltip": "SUPIR only: pre-upscale factor applied (bicubic) before SUPIR "
+                                   "encoding. Use 1.0 if the image is already at target resolution "
+                                   "(e.g. after a first-pass upscaler). Ignored for all other models.",
+                    },
+                ),
+                "supir_restore_cfg": (
+                    "FLOAT",
+                    {
+                        "default": -1.0,
+                        "min": -1.0,
+                        "max": 6.0,
+                        "step": 0.5,
+                        "tooltip": "SUPIR only: restoration fidelity guidance. -1.0 = disabled (default). "
+                                   "Positive values (e.g. 2.0–4.0) constrain the diffusion output "
+                                   "toward the source image, reducing invented texture in flat/dark areas "
+                                   "at the cost of less creative detail enhancement. "
+                                   "Ignored for all other models.",
                     },
                 ),
                 "sdxl_model_name": ("STRING", {
@@ -1904,11 +2035,86 @@ class RadianceAIUpscale:
             logger.error(f"[RadianceAIUpscale] SUPIR load failed: {e}\n" + _tb.format_exc())
             return None, f"SUPIR load failed: {e}"
 
-    def _run_supir(self, model_tuple, image, tile_size, tile_overlap, prompt="", steps=45):
+    def _run_supir(self, model_tuple, image, tile_size, tile_overlap, prompt="", steps=45,
+                   seed=1234, cfg_scale_start=4.0, cfg_scale_end=4.0,
+                   color_fix_type="None", scale_by=1.0, s_churn=5, restore_cfg=-1.0,
+                   mode="Standard"):
         """Run SUPIR inference using ComfyUI-SUPIR node classes as a backend."""
-        import inspect
+        import inspect, sys
 
         _, supir_model, supir_vae, supir_cls_map = model_tuple
+        B, H, W, _ = image.shape
+        report = []
+
+        # ALBABIT-FIX: HDR compression — SUPIR VAE requires input in [0, 1].
+        # HDR values > 1.0 are otherwise clipped, permanently destroying highlights.
+        #
+        # CRITICAL — do NOT normalize by max_val or high percentile.
+        #   If max_val = 28 (bright window), dividing by 28 forces midgray 0.18 → 0.006,
+        #   making the entire image appear near-black to SUPIR → it "restores" from black
+        #   → grain and artifacts everywhere.  Instead we rely on the natural properties
+        #   of each compression curve to map the bulk of scene content into [0, 1].
+        #
+        # Refine (HDR) — log1p(x), no normalization:
+        #   log1p maps [0, e−1≈1.718] → [0, 1] naturally.  Perceptual distribution is
+        #   similar to sRGB gamma (midgray 0.18 → 0.166, face 0.5 → 0.405, white 1.0 → 0.693).
+        #   Content above 1.718 is soft-clipped by step-0 bicubic clamp(0,1) and reconstructed
+        #   to 1.718 after expm1 expansion — a smooth "HDR knee", not a hard clip.
+        #   Inverse: expm1(result).  Exact for all non-clipped content.
+        #
+        # Normalize (HDR) — key-based auto-exposure:
+        #   Uses the geometric mean luminance ("scene key") to compute an exposure scale that
+        #   maps the typical scene midtone to 0.18 linear — matching SUPIR's training distribution.
+        #   Very bright outliers (specular, window) are soft-clipped by step 0.
+        #   Inverse: result / exposure_scale.
+        #   Max exposure cap (8×) prevents blown highlights on very dark source images.
+        #
+        # Standard: no compression — HDR values > 1.0 will be clipped (original behavior).
+        #
+        # Expansion is applied AFTER color_fix (step 5), which operates in compressed space.
+        hdr_meta = {}
+        if mode != "Standard":
+            min_val = image.min().item()
+            max_val = image.max().item()
+            if min_val < 0:
+                logger.warning(
+                    "[RadianceAIUpscale] SUPIR %s: negative linear values (min=%.4f) "
+                    "will be clamped to 0 before HDR compression, destroying out-of-gamut data. "
+                    "Apply a tone-mapping node before AI upscale if undesirable.", mode, min_val,
+                )
+
+            if mode == "Refine (HDR)":
+                # log1p without normalization: natural soft-clip knee at 1.718.
+                # midgray 0.18 → 0.166 | face 0.5 → 0.405 | SDR white 1.0 → 0.693
+                image = torch.log1p(torch.clamp(image, min=0.0))
+                hdr_meta["refine"] = True
+                logger.info(
+                    "[RadianceAIUpscale] SUPIR HDR Refine: max_val=%.3f → log1p range [0, %.3f]"
+                    " (soft-clip knee at x=1.718, expansion via expm1)",
+                    max_val, math.log1p(max(max_val, 0)),
+                )
+
+            elif mode == "Normalize (HDR)":
+                # Geometric-mean auto-exposure: maps scene midtone to 0.18 linear.
+                img_pos = torch.clamp(image, min=1e-4)
+                log_mean = torch.mean(torch.log(img_pos)).item()
+                geo_mean = math.exp(log_mean)
+                exposure_scale = min(0.18 / max(geo_mean, 1e-4), 8.0)  # cap at +3 stops
+                image = torch.clamp(image, min=0.0) * exposure_scale
+                hdr_meta["exposure_scale"] = exposure_scale
+                logger.info(
+                    "[RadianceAIUpscale] SUPIR HDR Normalize: max_val=%.3f geo_mean=%.4f"
+                    " exposure_scale=%.3f (midtone target 0.18)",
+                    max_val, geo_mean, exposure_scale,
+                )
+
+        # ALBABIT-FIX: Single summary log per execution — avoids console spam on sequences.
+        effective_prompt = prompt or "high quality, detailed"
+        logger.info(
+            f"[RadianceAIUpscale] SUPIR: {B} frame(s) {W}x{H} | "
+            f"mode={mode} steps={steps} seed={seed} cfg={cfg_scale_start}→{cfg_scale_end} "
+            f"s_churn={s_churn} color_fix={color_fix_type} scale_by={scale_by} tile={tile_size}"
+        )
 
         def _call(cls_name, method_name, **kwargs):
             cls = supir_cls_map.get(cls_name)
@@ -1918,16 +2124,35 @@ class RadianceAIUpscale:
             method = getattr(obj, method_name, None)
             if method is None:
                 raise RuntimeError(f"{cls_name}.{method_name}() not found")
-            sig    = inspect.signature(method)
-            # Forward only kwargs the method accepts; skip None values.
-            filtered = {k: v for k, v in kwargs.items() if k in sig.parameters and v is not None}
+            sig      = inspect.signature(method)
+            accepted = set(sig.parameters.keys())
+            # ALBABIT-FIX: Warn on kwargs silently dropped due to API mismatch (version drift).
+            dropped  = [k for k, v in kwargs.items() if k not in accepted and v is not None]
+            if dropped:
+                logger.warning(f"[RadianceAIUpscale] {cls_name}.{method_name}: unsupported kwargs dropped: {dropped}")
+            filtered = {k: v for k, v in kwargs.items() if k in accepted and v is not None}
             return method(**filtered)
+
+        # ── Step 0 : optional bicubic pre-upscale (equivalent to --upscale in CLI) ──
+        # ALBABIT-FIX: Pre-upscale image before encoding when scale_by > 1.0.
+        # image is (B, H, W, C) float32 in [0, 1] at this point (HDR was compressed above).
+        # The clamp below is intentional — it only removes bicubic ringing artefacts (values
+        # fractionally outside [0, 1] due to the cubic kernel overshoot), not HDR data.
+        input_for_encode = image
+        if scale_by != 1.0:
+            img_nchw = image.permute(0, 3, 1, 2)  # (B, C, H, W)
+            img_nchw = torch.nn.functional.interpolate(
+                img_nchw, scale_factor=scale_by, mode="bicubic", align_corners=False
+            ).clamp(0.0, 1.0)
+            input_for_encode = img_nchw.permute(0, 2, 3, 1)  # back to (B, H, W, C)
+            _, pH, pW, _ = input_for_encode.shape
+            report.append(f"pre-upscale bicubic x{scale_by} → {pW}x{pH}")
 
         # ── Step 1 : encode LQ frames to SUPIR latent space ──────────────────
         # SUPIR_encode processes the batch internally frame-by-frame.
         encode_result = _call("SUPIR_encode", "encode",
             SUPIR_VAE=supir_vae,
-            image=image,
+            image=input_for_encode,
             use_tiled_vae=True,
             encoder_tile_size=tile_size,
             encoder_dtype="auto",
@@ -1938,7 +2163,7 @@ class RadianceAIUpscale:
         cond_result = _call("SUPIR_conditioner", "condition",
             SUPIR_model=supir_model,
             latents=latents,
-            positive_prompt=prompt or "high quality, detailed",
+            positive_prompt=effective_prompt,
             negative_prompt="blurry, low quality, noise, artifacts, compression",
         )
         positive = cond_result[0]
@@ -1950,16 +2175,16 @@ class RadianceAIUpscale:
             latents=latents,
             positive=positive,
             negative=negative,
-            seed=42,
+            seed=seed,
             steps=steps,
-            cfg_scale_start=4.0,
-            cfg_scale_end=4.0,
-            EDM_s_churn=5,
-            s_noise=1.003,
+            cfg_scale_start=cfg_scale_start,
+            cfg_scale_end=cfg_scale_end,
+            EDM_s_churn=s_churn,
+            s_noise=1.003 if s_churn > 0 else 1.0,
             DPMPP_eta=1.0,
             control_scale_start=1.0,
             control_scale_end=1.0,
-            restore_cfg=-1.0,
+            restore_cfg=restore_cfg,
             keep_model_loaded=False,
             sampler="RestoreEDMSampler",
         )
@@ -1973,11 +2198,58 @@ class RadianceAIUpscale:
             decoder_tile_size=tile_size,
         )
         out_img = decode_result[0]  # (B, H, W, C) float32, already cpu
+        _, oH, oW, _ = out_img.shape
 
-        info = f"SUPIR upscale: {image.shape[0]} frame(s) via ComfyUI-SUPIR"
-        return out_img, info
+        # ── Step 5 : color correction (not available in nodes_v2 — applied manually) ──
+        # ALBABIT-FIX: color_fix_type mirrors SUPIR CLI --color_fix_type.
+        # Reference = input_for_encode (HDR-compressed, post-scale_by); target = decoded output.
+        # Both tensors are (B, H, W, C) float32 in [0, 1]; colorfix functions expect (B, C, H, W).
+        # ALBABIT-FIX: No clamp after color_fix — HDR expansion (step 6) must operate on the
+        # raw color-corrected values. Clamping here would destroy the HDR restore.
+        color_fix_status = "skipped"
+        if color_fix_type != "None":
+            try:
+                # ALBABIT-FIX: SUPIR is a sibling custom node — not on sys.path from radiance's context.
+                _supir_root = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "ComfyUI-SUPIR"))
+                if _supir_root not in sys.path:
+                    sys.path.insert(0, _supir_root)
+                from SUPIR.utils.colorfix import wavelet_reconstruction, adaptive_instance_normalization
+                ref = input_for_encode.permute(0, 3, 1, 2).to(out_img.device)  # (B, C, H, W)
+                tgt = out_img.permute(0, 3, 1, 2)                               # (B, C, H, W)
+                if ref.shape[-2:] != tgt.shape[-2:]:
+                    ref = torch.nn.functional.interpolate(ref, size=tgt.shape[-2:], mode="bicubic", align_corners=False)
+                if color_fix_type == "Wavelet":
+                    fixed = wavelet_reconstruction(tgt, ref)
+                else:  # AdaIn
+                    fixed = adaptive_instance_normalization(tgt, ref)
+                out_img = fixed.permute(0, 2, 3, 1)  # (B, H, W, C) — clamp deferred to step 6
+                color_fix_status = color_fix_type
+            except Exception as e:
+                logger.warning(f"[RadianceAIUpscale] color_fix={color_fix_type} failed, skipping: {e}")
+                color_fix_status = f"FAILED ({e})"
 
-    def _load_model(self, model_name: str, sdxl_model_name: str = ""):
+        # ── Step 6 : HDR expansion — restore original dynamic range ──────────────
+        # ALBABIT-FIX: Inverse of the HDR compression applied before step 0.
+        # out_img is (B, H, W, C) float32, currently in compressed space.
+        # For Standard mode, out_img stays in [0, 1] and is clamped as usual.
+        if mode == "Refine (HDR)" and hdr_meta.get("refine"):
+            # Exact inverse of log1p — content clipped to 1.0 by step 0 reconstructs to e−1≈1.718.
+            out_img = torch.expm1(out_img)
+        elif mode == "Normalize (HDR)" and "exposure_scale" in hdr_meta:
+            # Inverse of auto-exposure multiplication.
+            out_img = out_img / hdr_meta["exposure_scale"]
+
+        # Floor negatives (physically invalid); cap at 1.0 only for Standard (LDR output).
+        if mode == "Standard":
+            out_img = out_img.clamp(0.0, 1.0)
+        else:
+            out_img = torch.clamp(out_img, min=0.0)
+
+        report.insert(0, f"SUPIR: {B} frame(s) {W}x{H} → {oW}x{oH}")
+        report.append(f"mode={mode} steps={steps} seed={seed} cfg={cfg_scale_start}→{cfg_scale_end} color_fix={color_fix_status}")
+        return out_img, " | ".join(report)
+
+    def _load_model(self, model_name: str, sdxl_model_name: str = "", auto_download: bool = False):
         """Load an upscale model with caching."""
         with _CACHE_LOCK:
             # Check cache first
@@ -2000,18 +2272,23 @@ class RadianceAIUpscale:
                 )
 
             if model_path is None:
-                # Try auto-download
+                # ALBABIT-FIX: derive extension from URL to support .safetensors feedforward models.
+                url = self.MODEL_URLS.get(model_name, "")
+                ext = ".safetensors" if url.endswith(".safetensors") else ".pth"
                 models_dir = folder_paths.get_folder_paths("upscale_models")[0]
-                ext = ".safetensors" if "SUPIR" in model_name else ".pth"
                 target_path = os.path.join(models_dir, f"{model_name}{ext}")
 
-                if self._download_model(model_name, target_path):
+                # ALBABIT-FIX: auto_download was previously ignored — download was always attempted.
+                # Now gated on the flag; if False, return immediately with a clear message.
+                if auto_download and self._download_model(model_name, target_path):
                     model_path = target_path
                 else:
-                    return (
-                        None,
-                        f"Model {model_name} not found. Place in models/upscale_models/",
+                    msg = (
+                        f"Model {model_name} not found. "
+                        + ("Place in models/upscale_models/" if not auto_download
+                           else "Auto-download failed — check URL or internet connection.")
                     )
+                    return (None, msg)
 
             # ALBABIT-FIX: SUPIR models are diffusion-based and cannot be identified by
             # Spandrel (which only handles feedforward upscalers). Route them to a
@@ -2188,9 +2465,17 @@ class RadianceAIUpscale:
         mode: str = "Standard",
         tile_size: int = 512,
         tile_overlap: int = 32,
-        auto_download: bool = True,
-        unload_model: bool = False,
+        auto_download: bool = False,
+        scale_factor: float = 0.0,
+        unload_model: bool = True,
         supir_steps: int = 45,
+        supir_s_churn: int = 5,
+        seed: int = 1234,
+        supir_cfg_start: float = 4.0,
+        supir_cfg_end: float = 4.0,
+        color_fix_type: str = "None",
+        supir_scale_by: float = 1.0,
+        supir_restore_cfg: float = -1.0,
         sdxl_model_name: str = "",
         supir_prompt: str = "",
     ):
@@ -2198,8 +2483,8 @@ class RadianceAIUpscale:
 
         # Load model if needed
         if self.model is None or self.current_model_name != model_name:
-            # ALBABIT-FIX: forward sdxl_model_name to _load_supir_model via _load_model routing
-            self.model, load_info = self._load_model(model_name, sdxl_model_name=sdxl_model_name)
+            # ALBABIT-FIX: forward sdxl_model_name and auto_download to _load_model
+            self.model, load_info = self._load_model(model_name, sdxl_model_name=sdxl_model_name, auto_download=auto_download)
             self.current_model_name = model_name
 
             if self.model is None:
@@ -2211,7 +2496,10 @@ class RadianceAIUpscale:
         if isinstance(self.model, tuple) and self.model[0] == "supir":
             try:
                 result_images, info = self._run_supir(
-                    self.model, image, tile_size, tile_overlap, supir_prompt, supir_steps
+                    self.model, image, tile_size, tile_overlap, supir_prompt, supir_steps,
+                    seed=seed, cfg_scale_start=supir_cfg_start, cfg_scale_end=supir_cfg_end,
+                    color_fix_type=color_fix_type, scale_by=supir_scale_by, s_churn=supir_s_churn,
+                    restore_cfg=supir_restore_cfg, mode=mode,
                 )
             except Exception as e:
                 import traceback as _tb
@@ -2337,7 +2625,26 @@ class RadianceAIUpscale:
             # But avoid clamping max for HDR modes
             result = torch.clamp(result, min=0)
 
-            info = f"Upscaled with {model_name} ({scale}x) [{mode}]"
+            # ALBABIT-FIX: Post-upscale bicubic resize when scale_factor is set.
+            # 0.0 = native (skip). Any other value = target scale multiplier.
+            actual_scale = scale
+            if scale_factor > 0.0 and abs(scale_factor - scale) > 0.01:
+                _, h_in, w_in, _ = image.shape
+                target_h = max(1, int(round(h_in * scale_factor)))
+                target_w = max(1, int(round(w_in * scale_factor)))
+                result = F.interpolate(
+                    result.permute(0, 3, 1, 2),
+                    size=(target_h, target_w),
+                    mode="bicubic",
+                    align_corners=False,
+                ).permute(0, 2, 3, 1)
+                result = torch.clamp(result, min=0)
+                actual_scale = scale_factor
+                logger.info(
+                    f"Post-resize: {scale}x → {scale_factor}x (supersampling)"
+                )
+
+            info = f"Upscaled with {model_name} ({actual_scale}x) [{mode}]"
 
             if unload_model:
                 self.model = None

@@ -278,8 +278,10 @@ app.registerExtension({
 					}
 
 					const fmt    = formatWidget ? formatWidget.value : "";
-					const is_exr = fmt.includes("EXR");
-					const is_png = fmt.includes("PNG");
+					const is_exr      = fmt.includes("EXR");
+					const is_png      = fmt.includes("PNG");
+					// ALBABIT-FIX: metadata tEXt chunks only supported for PNG 8-bit (cv2 limitation on 16-bit).
+					const is_png_8bit = fmt.includes("PNG (8-bit)");
 					const is_jpg = fmt.includes("JPEG");
 					const is_webp = fmt.includes("WEBP");
 					const is_crf = fmt.includes("H.264") || fmt.includes("H.265");
@@ -316,7 +318,8 @@ app.registerExtension({
 					setWidgetVisible(bitDepthWidget,    isSeqLike && is_exr, node);
 					setWidgetVisible(compressionWidget, isSeqLike && is_exr, node);
 					setWidgetVisible(alphaModeWidget,   isSeqLike, node);
-					setWidgetVisible(metadataWidget,    isSeqLike, node);
+					// ALBABIT-FIX: metadata only supported for EXR and PNG 8-bit (JPG/HDR/WebP/PNG 16-bit ignore it).
+					setWidgetVisible(metadataWidget,    isSeqLike && (is_exr || is_png_8bit), node);
 
 					// ALBABIT-FIX: Audio suffix is only relevant when an export format is selected.
 					// audio_export itself is always visible (can also save audio alongside a video).

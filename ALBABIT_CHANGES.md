@@ -12,7 +12,7 @@
 This branch adds full LTX-Video 2.3 support (model loading, audio-video latent handling, correct 128-channel format), fixes several bugs in the Write node (quality control, audio export, H.264 encoder), improves the Resolution node (new presets, crop output, smart latent calculation), adds temporal decoding to the VAE decode node, and implements a clean SUPIR diffusion upscaler integration in the AI Upscale node.
 
 **Files modified:** `nodes_loader.py`, `nodes_resolution.py`, `nodes_sampler.py`, `nodes_io.py`, `nodes_depth.py`, `hdr/vae.py`, `image/upscale.py`  
-**Files modified (JS):** `js/radiance_io.js`, `js/radiance_resolution.js`, `js/radiance_sampler.js`  
+**Files modified (JS):** `js/radiance_io.js`, `js/radiance_resolution.js`, `js/radiance_sampler.js`, `js/radiance_upscale.js`  
 **Files added (JS):** `js/radiance_loader.js`, `js/radiance_upscale.js`  
 **Files added (workflows):** `workflows/LTX 2.3 (Test Workflow).rad`, `workflows/LTX 2.3 (Two 2x Latent Upscales Test Workflow).rad`
 
@@ -23,6 +23,98 @@ This branch adds full LTX-Video 2.3 support (model loading, audio-video latent h
 ---
 
 ### `image/upscale.py`
+
+#### SUPIR — widget defaults, new controls, and inference improvements *(April 2026)*
+
+**Default values:**
+- `auto_download`: `True` → `False` — avoids silent network calls on first run
+- `unload_model`: `False` → `True` — free VRAM after processing by default
+
+**New SUPIR-only widgets (hidden for non-SUPIR models via JS):**
+- `seed` (INT, default 1234, `control_after_generate`) — diffusion seed with Fixed/Randomize/Increment/Decrement ComfyUI control
+- `supir_steps` (INT, default 45) — number of diffusion steps
+- `supir_s_churn` (INT, default 5, range 0–40) — EDM stochastic churn; higher = more creative texture, lower = more faithful to source; 0 = fully deterministic
+- `supir_cfg_start` / `supir_cfg_end` (FLOAT, default 4.0) — linear CFG scale across diffusion steps
+- `color_fix_type` (LIST `["None", "AdaIn", "Wavelet"]`, default `"None"`) — post-decode color correction; AdaIn = global color statistics match; Wavelet = frequency-domain reconstruction (can cause edge ringing on high-contrast boundaries)
+- `supir_scale_by` (FLOAT, default 1.0, range 0.5–8.0) — bicubic pre-upscale before SUPIR encoding, equivalent to CLI `--upscale`; does not degrade the image (pure interpolation)
+- `supir_restore_cfg` (FLOAT, default -1.0, range -1.0–6.0) — restoration fidelity guidance; -1.0 = disabled; positive values (2.0–4.0) constrain output toward source, reducing invented texture in flat/dark areas
+
+**`_run_supir()` improvements:**
+- Step 0: bicubic pre-upscale via `F.interpolate` when `scale_by ≠ 1.0`
+- Step 3: `seed`, `cfg_scale_start`, `cfg_scale_end`, `EDM_s_churn`, `restore_cfg` now forwarded to `SUPIR_sample`
+- Step 3: `s_noise` auto-linked to churn: `1.003` when `s_churn > 0`, `1.0` when `s_churn = 0`
+- Step 5 (new): manual color correction via `SUPIR.utils.colorfix` (`wavelet_reconstruction` / `adaptive_instance_normalization`); not available in `nodes_v2` API, applied after decode
+- `_call()` now warns on kwargs silently dropped due to API version mismatch
+- Single summary `INFO` log per execution (instead of per-step logs) to avoid console spam on sequences
+- Rich `info` output string: reports actual output resolution, parameters applied, and color_fix status
+- `sys.path` fix: adds `ComfyUI-SUPIR` root before importing `SUPIR.utils.colorfix` (sibling node, not on default path)
+
+**SUPIR tile defaults (JS-side only):**
+- On model switch to SUPIR: `tile_size` → 1024, `tile_overlap` → 128 (SDXL-native resolution)
+- On switch away from SUPIR: previous values restored
+
+#### SUPIR — HDR mode support *(April 2026)*
+
+`_run_supir()` now accepts `mode` parameter and applies HDR compression/expansion around the SUPIR pipeline.
+SUPIR's VAE requires input in `[0, 1]`; without compression, HDR values > 1.0 were silently clipped.
+
+**`Refine (HDR)`** — `log1p(clamp(x, 0))` applied before encoding, `expm1(result)` after decoding:
+- Natural soft-clip knee at x ≈ 1.718 (where `log1p(1.718) = 1.0`)
+- Perceptual distribution similar to sRGB gamma: midgray 0.18 → 0.166, face 0.5 → 0.405, SDR white 1.0 → 0.693
+- Values above 1.718 are soft-clipped to ~1.718 in the output (chromaticity above the knee is not preserved)
+- Do NOT normalize by `max_val` or percentile — dividing by a large HDR max (e.g. 28) crushes midtones to near-zero, making SUPIR generate artifacts from what it perceives as a near-black image
+
+**`Normalize (HDR)`** — geometric-mean auto-exposure: maps scene midtone to 0.18 linear (matching SUPIR training distribution); capped at 8× to prevent overexposure on very dark sources. Inverse after decode.
+
+**`Standard`** — unchanged (clips above 1.0, original behavior).
+
+**Color fix (step 5)** operates in compressed `[0, 1]` space; expansion (step 6) applied after — `.clamp(0.0, 1.0)` removed from color fix output so expansion can restore full range.
+
+**`mode` tooltip** updated to describe each mode and document the SUPIR soft-clip behavior for HDR workflows.
+
+#### New feedforward models + MODEL_URLS + scale_factor + auto_download fix *(April 2026)*
+
+**New models added to `AI_MODELS`:**
+- `4xNomos8kDAT` — DAT architecture, Nomos8k dataset; faithful reconstruction, validated for `Refine (HDR)` mode
+- `4xRealWebPhoto_v4_dat2` — DAT2 architecture, real web photos; conservative on soft gradients
+
+Note: `4xNomosWebPhoto_RealPLKSR` was evaluated and removed — RealPLKSR architecture introduces a yellowish cast and destroys bokeh when used with `Refine (HDR)` mode.
+
+**`MODEL_URLS` completed for all models:**
+- `ESRGAN_4x` — community mirror (xinntao's filename for this variant)
+- `4x-UltraSharp` — official Kim2091/UltraSharp HuggingFace repo
+- `4x-AnimeSharp` — official Kim2091/AnimeSharp HuggingFace repo
+- `SwinIR_4x` — LykosAI/Upscalers HuggingFace repo
+- `HAT_4x` — vladmandic/sdnext-upscalers (source file named `HAT-4x.pth`, saved as `HAT_4x.pth`)
+- `4xNomos8kDAT` — Phips/4xNomos8kDAT HuggingFace (.safetensors)
+- `4xRealWebPhoto_v4_dat2` — Phips/4xRealWebPhoto_v4_dat2 HuggingFace (.safetensors)
+
+**`auto_download` bug fixed:**
+- `_load_model()` previously ignored the `auto_download` flag — download was always attempted if an URL existed in `MODEL_URLS`, regardless of the checkbox state
+- Fix: added `auto_download: bool = False` parameter to `_load_model()`; download now gated behind the flag
+- Error message differentiated: "Place in models/upscale_models/" when `auto_download=False`; "Auto-download failed" when `True` but download fails
+
+**Extension detection fix:**
+- `ext = ".safetensors" if "SUPIR" in model_name else ".pth"` — failed for new `.safetensors` feedforward models
+- Fix: `ext` now derived from the URL in `MODEL_URLS` (`url.endswith(".safetensors")`)
+
+**New `scale_factor` widget (feedforward models only):**
+- FLOAT, default `0.0`, range 0.0–8.0, step 0.25
+- `0.0` = native model scale (no post-resize)
+- Any other value = target scale multiplier applied via bicubic after the native upscale
+- Example: `scale_factor=2.0` with a 4x model → upscale to 4x then downsample to 2x (supersampling quality)
+- Hidden for SUPIR models (which use `supir_scale_by` for pre-encode scaling instead)
+- Placed in `required` section (between `tile_overlap` and `auto_download`) so it renders above `auto_download`
+
+#### SUPIR — widget defaults reset on model re-selection *(April 2026)*
+
+`updateSupirWidgets(resetDefaults)` in `js/radiance_upscale.js` now accepts a boolean parameter:
+- `resetDefaults = true` — called only from `modelWidget.callback` (manual model switch): resets ALL SUPIR widget values to their Python defaults on every switch to a SUPIR model (`SUPIR_WIDGET_DEFAULTS` constant added at top of file)
+- `resetDefaults = false` (default) — called from timeouts, `onConfigure`, `afterConfigureGraph`: visibility-only, saved workflow values are preserved
+
+**Widgets reset on SUPIR re-entry:** `supir_steps` (45), `supir_s_churn` (5), `seed` (1234), `supir_cfg_start` (4.0), `supir_cfg_end` (4.0), `color_fix_type` ("None"), `supir_scale_by` (1.0), `supir_restore_cfg` (-1.0), `tile_size` (1024), `tile_overlap` (128).
+
+Non-SUPIR tile values are saved on first SUPIR entry and restored on exit.
 
 #### SUPIR diffusion upscaler integration *(changes relative to the original file without SUPIR)*
 
@@ -63,14 +155,33 @@ for it. A dedicated code path delegates inference to the ComfyUI-SUPIR extension
 
 **`upscale()`:**
 - Added `supir_steps`, `sdxl_model_name`, `supir_prompt` parameters
-- SUPIR models routed to `_run_supir()` and bypass the HDR compress/expand pipeline (input passed as-is)
+- SUPIR models routed to `_run_supir()` with `mode` forwarded — HDR compress/expand now applied inside `_run_supir()` (see "SUPIR — HDR mode support" above)
 
 ---
 
-### `js/radiance_upscale.js` *(new file)*
+### `js/radiance_io.js`
+
+#### `custom_metadata` visibility: restricted to PNG (8-bit) only *(April 2026)*
+- Previously shown for all PNG formats — now hidden for `PNG (16-bit)` (cv2 limitation: no tEXt chunk support)
+- `is_png` condition replaced by `is_png_8bit` (`fmt.includes("PNG (8-bit)")`)
+
+---
+
+### `js/radiance_upscale.js` *(new file — updated April 2026)*
 
 Frontend companion for `RadianceAIUpscale`. Manages dynamic widget visibility.
 
+**April 2026 additions:**
+- New SUPIR-only widgets wired: `seed`, `control_after_generate`, `supir_s_churn`, `supir_cfg_start`, `supir_cfg_end`, `color_fix_type`, `supir_scale_by`, `supir_restore_cfg` — hidden for non-SUPIR models
+- SUPIR tile defaults applied on model switch: `tile_size` → 1024, `tile_overlap` → 128; previous values saved and restored on exit
+- `seed` widget uses name `"seed"` so ComfyUI auto-attaches Fixed/Randomize/Increment/Decrement control; companion `control_after_generate` widget found and defaulted to `"fixed"` on first SUPIR selection; both hidden/shown together
+- `SUPIR_WIDGET_DEFAULTS` constant: all SUPIR widget defaults reset on every manual switch to a SUPIR model; workflow-load values preserved (see `resetDefaults` parameter)
+
+**April 2026 additions (scale_factor + visibility fix):**
+- `scale_factor` widget (FLOAT) wired: hidden for SUPIR via `setFloatWidgetVisible()` (new function)
+- `setFloatWidgetVisible()` — specialized visibility function that avoids `type="hidden"` mangling for FLOAT/number widgets. The standard `setWidgetVisible` restores the original type via `_origType || "text"` fallback; for FLOAT widgets in Nodes 2.0, the original `type` string varies by renderer and the `"text"` fallback causes an empty-space artifact after restore. `setFloatWidgetVisible` relies on `widget.options.hidden` + `widget.hidden` + `computeSize` override only — no type mutation.
+
+**Original (at creation):**
 - Hides `supir_steps`, `sdxl_model_name`, `supir_prompt` when a non-SUPIR model is selected
 - Three-mechanism visibility (same pattern as `radiance_io.js`):
   `widget.options.hidden` + `widget.hidden` + `type="hidden"` + `computeSize=[0,-4]`
@@ -430,6 +541,8 @@ Frontend companion for the updated loader node — dynamic widget updates for `a
 
 | Hash | Description |
 |------|-------------|
+| `pending` | feat(upscale): HDR mode, feedforward models (DAT), scale_factor, auto_download fix, visibility fixes |
+| `eb0e8d5` | feat(upscale): SUPIR full controls — seed, cfg, s_churn, restore_cfg, color_fix, scale_by, tile defaults |
 | `9131d2f` | fix: widget visibility restore + path quote stripping (JS Nodes 2.0 + Python) |
 | `951ecf2` | fix(nodes_io): PNG alpha+metadata, video frame seeking, bit_depth EXR-only |
 | `a3493ea` | feat(upscale): SUPIR integration + radiance_upscale.js + Read node Single Frame fix + io sizing |
