@@ -1140,10 +1140,11 @@ class RadianceUnifiedLoader:
                         info_lines.append("◎ VAE: Baked from UNET")
                         if caching: _cache.put(baked_vae_key, vae)
                     if extract_audio_vae:
-                        # Dedicated instantiation required for AudioVAE architecture
+                        # ALBABIT-FIX: API changed in ComfyUI 0.22.0 — AudioVAE no longer takes sd directly.
+                        # Use state_dict_prefix_replace + comfy.sd.VAE (mirrors LTXVAudioVAELoader built-in).
                         sd, metadata = comfy.utils.load_torch_file(unet_path, return_metadata=True)
-                        from comfy.ldm.lightricks.vae.audio_vae import AudioVAE
-                        audio_vae = AudioVAE(sd, metadata)
+                        sd_audio = comfy.utils.state_dict_prefix_replace(sd, {"audio_vae.": "autoencoder.", "vocoder.": "vocoder."}, filter_keys=True)
+                        audio_vae = comfy.sd.VAE(sd=sd_audio, metadata=metadata)
                         logger.info("◎ AUDIO VAE: Extracted natively from UNET")
                         info_lines.append("◎ AUDIO VAE: Baked from UNET")
                         if caching: _cache.put(baked_audio_vae_key, audio_vae)
@@ -1210,9 +1211,11 @@ class RadianceUnifiedLoader:
                     info_lines.append(f"◎ AUDIO VAE: {audio_vae_name} (cached)")
                 else:
                     try:
+                        # ALBABIT-FIX: API changed in ComfyUI 0.22.0 — AudioVAE no longer takes sd directly.
+                        # Use state_dict_prefix_replace + comfy.sd.VAE (mirrors LTXVAudioVAELoader built-in).
                         sd, metadata = comfy.utils.load_torch_file(audio_vae_path, return_metadata=True)
-                        from comfy.ldm.lightricks.vae.audio_vae import AudioVAE
-                        audio_vae = AudioVAE(sd, metadata)
+                        sd = comfy.utils.state_dict_prefix_replace(sd, {"audio_vae.": "autoencoder.", "vocoder.": "vocoder."}, filter_keys=True)
+                        audio_vae = comfy.sd.VAE(sd=sd, metadata=metadata)
                         elapsed = time.time() - t0
                         logger.info(f"◎ AUDIO VAE: {audio_vae_name} ({elapsed:.1f}s)")
                         info_lines.append(f"◎ AUDIO VAE: {audio_vae_name} ({elapsed:.1f}s)")

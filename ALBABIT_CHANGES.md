@@ -396,6 +396,19 @@ Four-mechanism visibility supporting both LiteGraph canvas and Nodes 2.0:
 - Dropdown from `latent_upscale_models` folder
 - Auto-detects architecture: HunyuanVideo 720p (`blocks.0.block.0.conv.weight`), HunyuanVideo 1080p (`up.0.block.0.conv1.conv.weight`), LTX-Video latent upsampler (`post_upsample_res_blocks`)
 
+#### AudioVAE API fix for ComfyUI 0.22.0 *(May 2026)*
+
+The `AudioVAE` constructor signature changed in ComfyUI 0.22.0: it no longer accepts `(sd, metadata)` — the state dict is now loaded externally and routed via `comfy.sd.VAE`.
+
+- **Old code (broken):** `AudioVAE(sd, metadata)` — raised `TypeError: __init__() takes 2 positional arguments but 3 were given`
+- **Fix:** replaced both instantiation sites (baked extraction from UNET + standalone file) with:
+  ```python
+  sd = comfy.utils.state_dict_prefix_replace(sd, {"audio_vae.": "autoencoder.", "vocoder.": "vocoder."}, filter_keys=True)
+  audio_vae = comfy.sd.VAE(sd=sd, metadata=metadata)
+  ```
+- Mirrors the implementation of the new built-in `LTXVAudioVAELoader` node (`comfy_extras/nodes_lt_audio.py`)
+- Applied at two spots: baked extraction path (line ~1143) and standalone load path (line ~1214)
+
 #### VAE loading: metadata-aware for LTX 2.3
 - Uses `comfy.utils.load_torch_file(path, return_metadata=True)` and `comfy.sd.VAE(sd=sd, metadata=metadata)`
 - Required for LTX 2.3's 256-channel VAE (without metadata ComfyUI falls back to 128-ch config)
@@ -541,6 +554,7 @@ Frontend companion for the updated loader node — dynamic widget updates for `a
 
 | Hash | Description |
 |------|-------------|
+| `pending` | fix(loader): AudioVAE API compatibility with ComfyUI 0.22.0 |
 | `3cbb5b7` | feat(upscale): HDR mode, DAT models, scale_factor, auto_download fix, FLOAT visibility fix |
 | `eb0e8d5` | feat(upscale): SUPIR full controls — seed, cfg, s_churn, restore_cfg, color_fix, scale_by, tile defaults |
 | `9131d2f` | fix: widget visibility restore + path quote stripping (JS Nodes 2.0 + Python) |
