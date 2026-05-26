@@ -554,7 +554,7 @@ Frontend companion for the updated loader node — dynamic widget updates for `a
 
 | Hash | Description |
 |------|-------------|
-| `pending` | fix(loader): AudioVAE API compatibility with ComfyUI 0.22.0 |
+| `7a754e9` | fix(loader): AudioVAE API compatibility with ComfyUI 0.22.0 |
 | `3cbb5b7` | feat(upscale): HDR mode, DAT models, scale_factor, auto_download fix, FLOAT visibility fix |
 | `eb0e8d5` | feat(upscale): SUPIR full controls — seed, cfg, s_churn, restore_cfg, color_fix, scale_by, tile defaults |
 | `9131d2f` | fix: widget visibility restore + path quote stripping (JS Nodes 2.0 + Python) |
